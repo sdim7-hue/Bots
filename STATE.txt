@@ -12,29 +12,33 @@ Bots — оркестратор Claude Code. Источник правды «к�
 - orchestrator/ (Python 3.11, только stdlib):
   - core.py — модель Task + состояние в SQLite (StateStore).
   - config.py — токен (env/конфиг Claude), OWNER/REPO, путь к БД.
-  - github_client.py — REST-клиент: list_issues_by_label, get_issue,
-    set_status (меняет только status:*), add_comment; _request с GET/POST/PATCH.
-  - adapters/local.py — run_bot(brief, cwd, timeout) -> BotResult: запуск
-    `claude -p`, stdin=DEVNULL, захват UTF-8, таймаут; кроссплатформенный поиск claude.
-  - __main__.py — команды: list, run-bot (--message/--file --timeout),
-    run-next (автоцикл).
+  - github_client.py — REST: list_issues_by_label, get_issue, set_status, add_comment.
+  - adapters/local.py — run_bot(brief, cwd, timeout): запуск `claude -p`.
+  - __main__.py — команды: list, run-bot (--message/--file --timeout), run-next.
 - Claude Code CLI 2.1.158 авторизован (Claude Team, Opus 4.8); headless `claude -p` работает.
 
 == Issues ==
-- #1 MVP оркестратора (чтение очереди + состояние) — done.
-- #2 Адаптер запуска бота (run_bot) — done. Код написал сам бот; коммит 02691d3.
-- #3 Автономный цикл (run-next: queued→in-progress→run_bot→review/failed +
-  комментарий + SQLite) — review. Код написал сам бот; коммит 4ff34d1.
-  Критерий вживую НЕ прогонялся (run-next взял бы сам #3 + вложенный бот);
-  проверять на throwaway-issue. Ждёт подтверждения человеком → done.
+- #1 MVP оркестратора — done.
+- #2 Адаптер запуска бота (run_bot) — done. Написал бот; коммит 02691d3.
+- #3 Автономный цикл run-next — done. Написал бот; коммит 4ff34d1.
+  Проверен в бою на throwaway-issue #4: автономно провёл queued → in-progress →
+  review + оставил автокомментарий с exit_code, без ручного вмешательства.
+- #4 [test] smoke — закрыт (throwaway, проверка цикла).
+Очередь сейчас пуста.
 
-== Следующий шаг ==
-- Подтвердить #3 и проверить run-next на тестовой queued-issue [test] (потом закрыть).
-- Дальше (отдельные задачи): запуск цикла по расписанию; несколько ботов параллельно;
-  tmux-адаптер после переезда на Ubuntu.
+== Сквозной цикл работает ==
+issue(queued) -> run-next -> in-progress -> run_bot(claude -p) -> review/failed
++ комментарий + SQLite. Ревью пока делает оркестратор вручную (не отдельный бот).
+done ставит человек.
+
+== Следующий шаг (отдельные задачи) ==
+- Запуск цикла по расписанию (Windows Task Scheduler сейчас → cron/tmux на Ubuntu).
+- Несколько ботов параллельно.
+- Ultra Reviewer как отдельный бот.
+- tmux-адаптер после переезда на Ubuntu.
 
 == Как прогонять бота (детали — playbook L14/L16) ==
 clone с токеном -> бриф из GitHub API в brief.txt (UTF-8, лид ASCII) -> фоновый
 раннер `claude -p --permission-mode bypassPermissions` -> снять diff и критерий ->
 push с машины токеном. github-операции вне MCP — локальным Python+REST (L11).
-Автоцикл (run-next) вживую при сборке не запускать (L16).
+Автоцикл run-next вживую при сборке самой задачи на цикл не запускать (L16).
