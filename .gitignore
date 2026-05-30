@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# SQLite (локальное состояние)
+*.db
+*.sqlite
+*.sqlite3
+
+# Секреты — никогда в git (только локально)
+*.local.*
+.env
+secrets.*
+
+# ОС / редакторы
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
