@@ -1,48 +1,37 @@
-СОСТОЯНИЕ ПРОЕКТА BOTS — источник правды «как сейчас»
-=====================================================
-Обновляется в КОНЦЕ работы над темой. Читается ПЕРВЫМ при входе. (P3/P4 playbook)
+Bots — оркестратор Claude Code. Источник правды «как сейчас». Читать первым.
+Обновлено: 30.05.2026.
 
-Дата последнего обновления: 2026-05-30
+== Что это ==
+Цепочка: человек → Claude-оркестратор → боты Claude Code → GitHub.
+Задачи = GitHub Issues с метками статуса. Цель — параллельная работа с
+автоконтролем. Курс OS-агностичный: Windows сейчас → Ubuntu/tmux потом (ADR-002).
 
-ЧТО ЭТО
--------
-Система оркестрации Claude Code ботов. Цель — параллельное выполнение задач
-с автоматической постановкой и контролем. Участники: человек -> Claude-оркестратор
--> боты Claude Code -> GitHub.
+== Состояние ==
+- Каркас: README, STATE, CLAUDE.md, docs/ (architecture; decisions ADR-001..004),
+  .github/ISSUE_TEMPLATE.
+- Метки (15) + шаблон-бриф из 5 блоков — готовы.
+- orchestrator/ (Python 3.11, только stdlib):
+  - core.py, github_client.py, config.py — чтение очереди status:queued +
+    состояние в SQLite. (#1, done)
+  - adapters/local.py — run_bot(brief, cwd, timeout) -> BotResult: запуск
+    `claude -p`, stdin=DEVNULL, захват UTF-8, таймаут -> TimeoutError;
+    кроссплатформенный поиск claude (shutil.which + %APPDATA%\npm). (#2, review)
+  - __main__.py — команды `list` и `run-bot --message/--file --timeout`.
+- Claude Code CLI 2.1.158 установлен и авторизован (Claude Team, Opus 4.8);
+  headless `claude -p` работает.
 
-КУРС (утверждён 2026-05-30)
----------------------------
-- Ядро OS-агностично: GitHub Issues = очередь задач, GitHub Actions = автоконтроль,
-  Python-оркестратор. (вариант C+B)
-- Запуск ботов — заменяемый адаптер. Сейчас Windows, целевая среда — Ubuntu + tmux
-  (схема как у Ильи: N кодеров + Ultra Reviewer + Диспетчер, автономный цикл).
-- Переход на Ubuntu плавный: dual-boot -> при успехе Windows удаляется; плюс второй ПК.
+== Issues ==
+- #1 MVP оркестратора (чтение очереди + состояние) — done.
+- #2 Адаптер запуска бота — review. Код написал сам бот (headless), критерий
+  PONG/exit=0 проверен оркестратором, коммит 02691d3 (feat:) в main.
+  Ждёт подтверждения человеком -> done.
 
-ГДЕ ОСТАНОВИЛИСЬ (2026-05-30)
---------------------------
-- Каркас репо залит: README, STATE, CLAUDE.md, docs/ (architecture, decisions, labels).
-- Метки очереди созданы в GitHub (15 шт: status/type/auto/p1-3). Шаблон issue —
-  .github/ISSUE_TEMPLATE/task.yml (бриф из 5 блоков).
-- MVP оркестратора (задача #1) НАПИСАН и РАБОТАЕТ: `orchestrator/` — чтение
-  очереди status:queued через GitHub API (urllib, без зависимостей) + состояние SQLite.
-  Проверено на ПК: `python -m orchestrator list` показывает очередь. Статус #1: review
-  (ждёт подтверждения человека -> done).
-- BOOTSTRAP-исключение: MVP #1 написан оркестратором напрямую (вопреки ADR-003),
-  т.к. Claude Code ещё не установлен и цикла нет. Дальше код пишут боты.
+== Следующий шаг ==
+- #3 (ещё не заведена): связать в автономный цикл — оркестратор берёт
+  status:queued, ставит in-progress, запускает run_bot с брифом из тела issue,
+  по результату двигает статус в review/failed.
 
-ЗАПУСК (проверено)
-----------------
-  git clone --depth 1 https://github.com/sdim7-hue/Bots %TEMP%\bots-run2
-  $env:PYTHONPATH = "%TEMP%\bots-run2"; python -m orchestrator list
-  (токен берётся из GITHUB_TOKEN или конфига Claude; cwd не наследуется — см. L12)
-
-СЛЕДУЮЩИЕ ШАГИ
---------------
-1. Подтвердить #1 -> done (решение человека).
-2. Установить Claude Code + авторизация (участие человека — логин). Сейчас не установлен.
-3. Следующая задача: адаптер запуска бота + переходы статусов (queued->in-progress->...).
-4. GitHub Actions: базовый CI как сигнал контроля.
-
-ОТКРЫТЫЕ ВОПРОСЫ
----------------
-- Механика параллельного запуска нескольких Claude Code на Windows (до переезда на Ubuntu).
+== Как прогонять бота (детали — playbook L14) ==
+clone с токеном -> бриф из GitHub API в brief.txt (UTF-8) -> фоновый раннер
+`claude -p --permission-mode bypassPermissions` -> снять diff и критерий ->
+push с машины токеном. github-операции вне MCP — локальным Python+REST (L11).
