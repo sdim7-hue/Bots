@@ -1,0 +1,45 @@
+name: Задача боту (бриф)
+description: Задача для бота Claude Code. Структура — 5 блоков.
+title: "[задача] "
+labels: ["status:queued"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Заполни все 5 блоков. Бриф = направление + критерий успеха, не пошаговая инструкция написания кода.
+  - type: textarea
+    id: context
+    attributes:
+      label: "1. Контекст / зачем"
+      description: Смысловая цель — какую проблему закрываем, почему важно.
+      placeholder: Чего добиваемся и зачем (2-4 строки).
+    validations:
+      required: true
+  - type: textarea
+    id: actions
+    attributes:
+      label: "2. Конкретные действия"
+      description: Чёткие шаги (с примерами команд, если применимо).
+    validations:
+      required: true
+  - type: textarea
+    id: result
+    attributes:
+      label: "3. Формат результата / критерий готовности"
+      description: Где и в каком виде результат; как понять что готово.
+    validations:
+      required: true
+  - type: textarea
+    id: constraints
+    attributes:
+      label: "4. Ограничения"
+      description: Что НЕ делать (scope, read-only, не трогать X).
+    validations:
+      required: false
+  - type: textarea
+    id: after
+    attributes:
+      label: "5. После выполнения"
+      description: Что дальше — idle / следующая задача / эскалация.
+    validations:
+      required: false
