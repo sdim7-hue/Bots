@@ -4,7 +4,7 @@
   python -m orchestrator run-bot   — вручную запустить бота с брифом (проверка адаптера).
   python -m orchestrator run-next  — взять старейшую queued, прогнать бота, двинуть статус.
 
-Токен берётся из окружения или конфига Claude (см. config.py). Не печатается.
+Бэкенд очереди (GitHub/Forgejo) и токен — см. config.py. Токен не печатается.
 """
 
 from __future__ import annotations
@@ -16,7 +16,6 @@ from pathlib import Path
 from . import config
 from .adapters.local import run_bot
 from .core import StateStore, Task
-from .github_client import GitHubClient, GitHubError
 
 # Дефолтный таймаут ручного запуска бота, секунды.
 _RUN_BOT_TIMEOUT = 600
@@ -24,15 +23,14 @@ _RUN_BOT_TIMEOUT = 600
 
 def cmd_list() -> int:
     try:
-        token = config.get_token()
+        client = config.make_client()
     except RuntimeError as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 2
 
-    client = GitHubClient(token, config.OWNER, config.REPO)
     try:
         issues = client.list_issues_by_label("status:queued")
-    except GitHubError as exc:
+    except config.client_errors() as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1
 
@@ -83,7 +81,7 @@ def _finalize(client, store, task, new_status, exit_code, note) -> None:
     """
     try:
         client.set_status(task.number, new_status)
-    except GitHubError as exc:
+    except config.client_errors() as exc:
         print(f"Предупреждение: не удалось сменить статус на {new_status}: {exc}",
               file=sys.stderr)
     else:
@@ -97,24 +95,23 @@ def _finalize(client, store, task, new_status, exit_code, note) -> None:
         comment = f"Автоцикл оркестратора: {note} → status:{new_status}."
     try:
         client.add_comment(task.number, comment)
-    except GitHubError as exc:
+    except config.client_errors() as exc:
         print(f"Предупреждение: не удалось добавить комментарий: {exc}",
               file=sys.stderr)
 
 
 def cmd_run_next(timeout: int) -> int:
     try:
-        token = config.get_token()
+        client = config.make_client()
     except RuntimeError as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 2
 
-    client = GitHubClient(token, config.OWNER, config.REPO)
     store = StateStore(config.STATE_DB)
     try:
         try:
             issues = client.list_issues_by_label("status:queued")
-        except GitHubError as exc:
+        except config.client_errors() as exc:
             print(f"Ошибка: {exc}", file=sys.stderr)
             return 1
 
@@ -130,7 +127,7 @@ def cmd_run_next(timeout: int) -> int:
         # queued -> in-progress
         try:
             client.set_status(task.number, "in-progress")
-        except GitHubError as exc:
+        except config.client_errors() as exc:
             print(f"Ошибка смены статуса на in-progress: {exc}", file=sys.stderr)
             return 1
         task.status = "in-progress"

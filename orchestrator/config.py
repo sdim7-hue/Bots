@@ -1,10 +1,10 @@
 """Конфигурация оркестратора.
 
-Источник токена (по приоритету):
-  1. Переменная окружения GITHUB_TOKEN или GH_TOKEN (чистый OS-агностичный путь).
-  2. Конфиг Claude Desktop (claude_desktop_config.json) — best-effort по платформам.
+Бэкенд очереди задач (переменная окружения BOTS_BACKEND):
+  - "github" (по умолчанию) — issues/labels на GitHub;
+  - "forgejo" — issues/labels на self-hosted Forgejo (Gitea API).
 
-Токен НИКОГДА не печатается и не логируется (см. CLAUDE.md, L11 playbook).
+Токен НИКОГДА не печатается и не логируется (см. CLAUDE.md, playbook).
 """
 
 from __future__ import annotations
@@ -14,9 +14,22 @@ import os
 import sys
 from pathlib import Path
 
-# Репозиторий-цель. Переопределяется через env, дефолт — наш проект.
-OWNER = os.environ.get("BOTS_OWNER", "sdim7-hue")
+# Бэкенд очереди.
+BACKEND = os.environ.get("BOTS_BACKEND", "github").strip().lower()
+
+# Репозиторий-цель. Дефолт владельца зависит от бэкенда.
+_DEFAULT_OWNER = "dimir" if BACKEND == "forgejo" else "sdim7-hue"
+OWNER = os.environ.get("BOTS_OWNER", _DEFAULT_OWNER)
 REPO = os.environ.get("BOTS_REPO", "Bots")
+
+# Базовый URL API (без хвостового слэша).
+_DEFAULT_API = (
+    "http://127.0.0.1:3000/api/v1" if BACKEND == "forgejo" else "https://api.github.com"
+)
+API_BASE = os.environ.get("BOTS_API_BASE", _DEFAULT_API).rstrip("/")
+
+# Корневой CA (PEM) для TLS к Forgejo по https. Для http/localhost не нужен.
+CAFILE = os.environ.get("BOTS_CAFILE") or None
 
 # Локальное состояние (SQLite). В .gitignore (*.db).
 STATE_DB = Path(os.environ.get("BOTS_STATE_DB", Path.home() / ".bots" / "state.db"))
@@ -57,7 +70,17 @@ def _find_token_in_obj(obj) -> str | None:
 
 
 def get_token() -> str:
-    """Возвращает GitHub-токен или бросает RuntimeError с понятным сообщением."""
+    """Возвращает токен очереди или бросает RuntimeError с понятным сообщением."""
+    if BACKEND == "forgejo":
+        for var in ("BOTS_TOKEN", "FORGEJO_TOKEN"):
+            token = os.environ.get(var)
+            if token:
+                return token
+        raise RuntimeError(
+            "Forgejo-токен не найден. Задай переменную окружения BOTS_TOKEN "
+            "(или FORGEJO_TOKEN)."
+        )
+
     for var in ("GITHUB_TOKEN", "GH_TOKEN"):
         token = os.environ.get(var)
         if token:
@@ -79,3 +102,20 @@ def get_token() -> str:
         "GitHub-токен не найден. Задай переменную окружения GITHUB_TOKEN "
         "или убедись, что github-MCP настроен в claude_desktop_config.json."
     )
+
+
+def make_client():
+    """Создаёт клиент очереди по выбранному бэкенду (единый интерфейс)."""
+    token = get_token()
+    if BACKEND == "forgejo":
+        from .forgejo_client import ForgejoClient
+        return ForgejoClient(token, OWNER, REPO, API_BASE, cafile=CAFILE)
+    from .github_client import GitHubClient
+    return GitHubClient(token, OWNER, REPO)
+
+
+def client_errors() -> tuple:
+    """Кортеж исключений клиентов — для единого except в CLI."""
+    from .github_client import GitHubError
+    from .forgejo_client import ForgejoError
+    return (GitHubError, ForgejoError)
