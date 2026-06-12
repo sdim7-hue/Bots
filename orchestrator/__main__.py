@@ -20,6 +20,9 @@ from .core import StateStore, Task
 # Дефолтный таймаут ручного запуска бота, секунды.
 _RUN_BOT_TIMEOUT = 600
 
+# Максимальная длина вывода бота, попадающего в комментарий issue.
+_COMMENT_OUTPUT_LIMIT = 1500
+
 
 def cmd_list() -> int:
     try:
@@ -69,11 +72,29 @@ def cmd_run_bot(message: str | None, file: str | None, timeout: int) -> int:
         return 1
 
     print(result.output, end="" if result.output.endswith("\n") else "\n")
-    print(f"exit_code={result.exit_code}")
+    print(f"exit_code={result.exit_code} ok={result.ok} subtype={result.subtype}")
     return 0 if result.ok else 1
 
 
-def _finalize(client, store, task, new_status, exit_code, note) -> None:
+def _bot_comment(new_status: str, result) -> str:
+    """Формирует комментарий с итогом бота для ревью (см. L52)."""
+    out = (result.output or "").strip()
+    if len(out) > _COMMENT_OUTPUT_LIMIT:
+        out = out[:_COMMENT_OUTPUT_LIMIT] + "\n…(вывод обрезан)"
+    meta = f"exit_code={result.exit_code}, ok={result.ok}"
+    if result.subtype:
+        meta += f", subtype={result.subtype}"
+    if result.cost_usd is not None:
+        meta += f", cost=${result.cost_usd:.4f}"
+    if result.num_turns is not None:
+        meta += f", turns={result.num_turns}"
+    return (
+        f"Автоцикл оркестратора → status:{new_status} ({meta}).\n\n"
+        f"Вывод бота:\n\n{out or '(пусто)'}"
+    )
+
+
+def _finalize(client, store, task, new_status, result, note) -> None:
     """Фиксирует итог: меняет статус, обновляет SQLite, пишет комментарий.
 
     Сбои API на этом этапе не валят процесс — бот уже отработал; ошибки лишь
@@ -88,9 +109,8 @@ def _finalize(client, store, task, new_status, exit_code, note) -> None:
         task.status = new_status
     store.upsert(task)
 
-    if exit_code is not None:
-        comment = (f"Автоцикл оркестратора: бот завершился с exit_code={exit_code} "
-                   f"→ status:{new_status}.")
+    if result is not None:
+        comment = _bot_comment(new_status, result)
     else:
         comment = f"Автоцикл оркестратора: {note} → status:{new_status}."
     try:
@@ -140,14 +160,16 @@ def cmd_run_next(timeout: int) -> int:
             result = run_bot(brief, cwd=Path.cwd(), timeout=timeout)
         except TimeoutError as exc:
             print(f"Ошибка: {exc}", file=sys.stderr)
-            _finalize(client, store, task, new_status="failed", exit_code=None,
+            _finalize(client, store, task, new_status="failed", result=None,
                       note="бот не завершился за отведённое время (timeout)")
             return 1
 
         new_status = "review" if result.ok else "failed"
-        _finalize(client, store, task, new_status=new_status,
-                  exit_code=result.exit_code, note=None)
-        print(f"#{task.number}: exit_code={result.exit_code} → status:{new_status}")
+        _finalize(client, store, task, new_status=new_status, result=result, note=None)
+        extra = f", subtype={result.subtype}" if result.subtype else ""
+        cost = f", cost=${result.cost_usd:.4f}" if result.cost_usd is not None else ""
+        print(f"#{task.number}: exit_code={result.exit_code} ok={result.ok} "
+              f"→ status:{new_status}{extra}{cost}")
         return 0 if result.ok else 1
     finally:
         store.close()
