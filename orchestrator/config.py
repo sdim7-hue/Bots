@@ -31,6 +31,9 @@ API_BASE = os.environ.get("BOTS_API_BASE", _DEFAULT_API).rstrip("/")
 # Корневой CA (PEM) для TLS к Forgejo по https. Для http/localhost не нужен.
 CAFILE = os.environ.get("BOTS_CAFILE") or None
 
+# Local checkout of the TARGET repo on this node (bot runs here). Per-node.
+CHECKOUT = os.environ.get("BOTS_CHECKOUT") or None
+
 # Локальное состояние (SQLite). В .gitignore (*.db).
 STATE_DB = Path(os.environ.get("BOTS_STATE_DB", Path.home() / ".bots" / "state.db"))
 

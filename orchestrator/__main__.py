@@ -66,7 +66,7 @@ def cmd_run_bot(message: str | None, file: str | None, timeout: int) -> int:
         return 2
 
     try:
-        result = run_bot(brief, cwd=Path.cwd(), timeout=timeout)
+        result = run_bot(brief, cwd=(Path(config.CHECKOUT) if config.CHECKOUT else Path.cwd()), timeout=timeout)
     except TimeoutError as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
         return 1
@@ -157,7 +157,7 @@ def cmd_run_next(timeout: int) -> int:
         brief = issue.get("body") or task.title
 
         try:
-            result = run_bot(brief, cwd=Path.cwd(), timeout=timeout)
+            result = run_bot(brief, cwd=(Path(config.CHECKOUT) if config.CHECKOUT else Path.cwd()), timeout=timeout)
         except TimeoutError as exc:
             print(f"Ошибка: {exc}", file=sys.stderr)
             _finalize(client, store, task, new_status="failed", result=None,
@@ -176,6 +176,11 @@ def cmd_run_next(timeout: int) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     parser = argparse.ArgumentParser(prog="orchestrator", description="Bots orchestrator")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("list", help="показать очередь queued")
