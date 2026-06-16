@@ -84,7 +84,7 @@ def run_bot(brief: str, cwd: Path, timeout: int) -> BotResult:
     claude = _find_claude()
     cmd = [
         claude,
-        "-p", brief,
+        "-p",
         "--permission-mode", _PERMISSION_MODE,
         "--output-format", "json",
     ]
@@ -93,7 +93,7 @@ def run_bot(brief: str, cwd: Path, timeout: int) -> BotResult:
         completed = subprocess.run(
             cmd,
             cwd=str(cwd),
-            stdin=subprocess.DEVNULL,
+            input=brief,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             encoding="utf-8",
