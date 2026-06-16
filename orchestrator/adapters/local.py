@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # Режим разрешений Claude Code для headless-бота (см. docstring модуля).
-_PERMISSION_MODE = "acceptEdits"
+_PERMISSION_MODE = "bypassPermissions"
 
 
 @dataclass
