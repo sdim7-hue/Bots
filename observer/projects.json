@@ -4,5 +4,19 @@
     "backend": "github",
     "owner": "sdim7-hue",
     "repo": "Bots"
+  },
+  {
+    "name": "map (Forgejo)",
+    "backend": "forgejo",
+    "owner": "dimir",
+    "repo": "telecom-digital-twin",
+    "api_base": "http://127.0.0.1:3000/api/v1"
+  },
+  {
+    "name": "zvuk (Forgejo)",
+    "backend": "forgejo",
+    "owner": "dimir",
+    "repo": "zvuk",
+    "api_base": "http://127.0.0.1:3000/api/v1"
   }
 ]
