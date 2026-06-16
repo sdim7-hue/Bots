@@ -108,7 +108,7 @@ def _render_html(payload: dict) -> str:
     else:
         parts.append("<p class='muted'>Событий пока нет.</p>")
 
-    parts.append("<p class='muted'><a href='/api/state'>/api/state (JSON)</a></p>")
+    parts.append("<p class='muted'><a href='api/state'>/api/state (JSON)</a></p>")
     parts.append("</body></html>")
     return "".join(parts)
 
