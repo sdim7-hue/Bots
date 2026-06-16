@@ -1,0 +1,16 @@
+[Unit]
+Description=Observer dashboard (read-only, localhost)
+After=network-online.target forgejo.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dsolovev
+WorkingDirectory=/opt/observer/src
+EnvironmentFile=/etc/observer.env
+ExecStart=/usr/bin/python3 -m observer serve --host 127.0.0.1 --port 8787
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

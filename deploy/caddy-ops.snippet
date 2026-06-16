@@ -1,0 +1,13 @@
+# OPTIONAL dashboard exposure. Add INSIDE the EXISTING 192.168.80.127 site block
+# (the one already serving '/' -> 3017 [map] and '/git/' -> 3000 [forgejo]).
+# Put this handle BEFORE the catch-all map handle. Do NOT modify the map or /git/ blocks.
+
+handle_path /ops/* {
+    reverse_proxy 127.0.0.1:8787
+}
+
+# Caveat: the dashboard uses absolute paths (/api/state); behind a /ops/ subpath those
+# resolve to root and may break (cf. Forgejo ROOT_URL issue, playbook L45-dop). Prefer the
+# SSH-tunnel access in DEPLOY.md for the first cut; use this snippet only after a base-path tweak.
+# After editing: caddy validate --adapter caddyfile --config /tmp/Caddyfile.new ; backup
+# /etc/caddy/Caddyfile ; systemctl reload caddy.  Dashboard then at https://192.168.80.127/ops/
