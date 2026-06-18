@@ -10,6 +10,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -18,7 +20,7 @@ from .adapters.local import run_bot
 from .core import StateStore, Task
 
 # Дефолтный таймаут ручного запуска бота, секунды.
-_RUN_BOT_TIMEOUT = 600
+_RUN_BOT_TIMEOUT = int(os.environ.get("BOTS_BOT_TIMEOUT", "2400"))
 
 # Максимальная длина вывода бота, попадающего в комментарий issue.
 _COMMENT_OUTPUT_LIMIT = 1500
@@ -120,6 +122,22 @@ def _finalize(client, store, task, new_status, result, note) -> None:
               file=sys.stderr)
 
 
+def _refresh_checkout() -> None:
+    """Reset the isolated bot checkout to pristine main before a run (avoid drift).
+    Checkout has NO push remote; base is a read-only URL/path fetched one-shot from
+    BOTS_CHECKOUT_BASE. Best-effort."""
+    co = config.CHECKOUT
+    base = config.CHECKOUT_BASE
+    if not co or not base:
+        return
+    for git_args in (["fetch", base, "main"], ["reset", "--hard", "FETCH_HEAD"], ["clean", "-fd"]):
+        try:
+            subprocess.run(["git", "-C", co] + git_args, check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
+        except Exception:
+            pass
+
+
 def cmd_run_next(timeout: int) -> int:
     try:
         client = config.make_client()
@@ -152,6 +170,8 @@ def cmd_run_next(timeout: int) -> int:
             return 1
         task.status = "in-progress"
         store.upsert(task)
+
+        _refresh_checkout()
 
         # Бриф — тело issue как есть (фолбэк на заголовок, если тело пустое).
         brief = issue.get("body") or task.title

@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import signal
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -73,60 +74,77 @@ def _parse_result(raw: str) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def run_bot(brief: str, cwd: Path, timeout: int) -> BotResult:
-    """Запускает Claude Code с брифом в каталоге `cwd` и снимает результат.
-
-    Бот стартует в режиме разрешений acceptEdits (правка файлов разрешена,
-    shell — нет) и с `--output-format json`, чтобы судить об успехе по
-    структурному полю is_error, а не только по коду возврата (см. L52).
-    stdin — из пустого (DEVNULL). По таймауту — понятная ошибка.
-    """
-    claude = _find_claude()
-    cmd = [
-        claude,
-        "-p",
-        "--permission-mode", _PERMISSION_MODE,
-        "--output-format", "json",
-    ]
-
+def _kill_tree(pid: int) -> None:
+    """Best-effort kill of the bot process tree. Claude Code spawns helper processes
+    that otherwise linger and eventually hang the windows-cli bridge."""
     try:
-        completed = subprocess.run(
-            cmd,
-            cwd=str(cwd),
-            input=brief,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-        )
-    except subprocess.TimeoutExpired as exc:
-        partial = exc.output or ""
-        raise TimeoutError(
-            f"Claude Code не завершился за {timeout} с (timeout). "
-            f"Частичный вывод:\n{partial}"
-        ) from exc
+        if os.name == "nt":
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(pid)],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
+        else:
+            os.killpg(os.getpgid(pid), signal.SIGKILL)
+    except Exception:
+        pass
 
-    raw = completed.stdout or ""
+
+def run_bot(brief: str, cwd: Path, timeout: int) -> BotResult:
+    """Run Claude Code with the brief on STDIN in cwd and collect the result.
+
+    Brief goes on stdin (a long/multiline brief as a CLI arg breaks claude.cmd
+    arg-forwarding and silently drops trailing flags like --permission-mode). On
+    completion or timeout the whole child process tree is killed so helper processes
+    do not pile up. Success is judged by the JSON subtype, not the exit code (a long
+    successful run can still exit nonzero)."""
+    claude = _find_claude()
+    cmd = [claude, "-p", "--permission-mode", _PERMISSION_MODE, "--output-format", "json"]
+
+    popen_kwargs = dict(
+        cwd=str(cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE, encoding="utf-8", errors="replace",
+    )
+    if os.name == "nt":
+        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        popen_kwargs["start_new_session"] = True
+
+    proc = subprocess.Popen(cmd, **popen_kwargs)
+    timed_out = False
+    try:
+        out, err = proc.communicate(input=brief, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        _kill_tree(proc.pid)
+        try:
+            out, err = proc.communicate(timeout=30)
+        except Exception:
+            out, err = "", ""
+    finally:
+        _kill_tree(proc.pid)
+
+    if timed_out:
+        raise TimeoutError(
+            f"Claude Code did not finish within {timeout}s (timeout). Partial output:\n{out or ''}"
+        )
+
+    returncode = proc.returncode
+    raw = out or ""
     data = _parse_result(raw)
 
     is_error = data.get("is_error")
     result_text = data.get("result")
     if not result_text:
-        # парс не удался или поля нет — показываем сырой вывод (+ stderr, если был)
         result_text = raw
-        stderr = completed.stderr or ""
+        stderr = err or ""
         if stderr.strip():
             result_text = (result_text + "\n[stderr]\n" + stderr).strip()
 
-    ok = (completed.returncode == 0) and (is_error is not True)
+    subtype = data.get("subtype")
+    if subtype is not None:
+        ok = (subtype == "success") and (is_error is not True)
+    else:
+        ok = (returncode == 0) and (is_error is not True)
 
     return BotResult(
-        exit_code=completed.returncode,
-        output=result_text,
-        ok=ok,
-        subtype=data.get("subtype"),
-        cost_usd=data.get("total_cost_usd"),
-        num_turns=data.get("num_turns"),
-        raw=raw,
+        exit_code=returncode, output=result_text, ok=ok, subtype=subtype,
+        cost_usd=data.get("total_cost_usd"), num_turns=data.get("num_turns"), raw=raw,
     )

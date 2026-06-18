@@ -34,6 +34,10 @@ CAFILE = os.environ.get("BOTS_CAFILE") or None
 # Local checkout of the TARGET repo on this node (bot runs here). Per-node.
 CHECKOUT = os.environ.get("BOTS_CHECKOUT") or None
 
+# Read-only source to refresh the bot checkout to pristine main before each run
+# (checkout has NO push remote - mechanical review-gate). Per-node.
+CHECKOUT_BASE = os.environ.get("BOTS_CHECKOUT_BASE") or None
+
 # Локальное состояние (SQLite). В .gitignore (*.db).
 STATE_DB = Path(os.environ.get("BOTS_STATE_DB", Path.home() / ".bots" / "state.db"))
 
