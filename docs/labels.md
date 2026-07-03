@@ -9,6 +9,7 @@
 | `status:queued` | `#cccccc` | в очереди, не взята |
 | `status:in-progress` | `#1d76db` | бот работает |
 | `status:review` | `#fbca04` | на ревью у Ultra Reviewer |
+| `status:tested` | `#c2e0c6` | ревью пройдено, проверено тестировщиком |
 | `status:done` | `#0e8a16` | завершена, подтверждена |
 | `status:failed` | `#b60205` | не удалась |
 | `status:blocked` | `#d93f0b` | эскалация типа A — ждём данные/решение |
@@ -23,6 +24,10 @@
 | `type:chore` | `#ededed` |
 | `type:refactor` | `#c5def5` |
 
+## Роль исполнителя
+
+Метки `role:*` (маршрутизация к роли, у задачи ровно одна) — см. [labels-roles.md](labels-roles.md).
+
 ## Источник и приоритет
 
 | Метка | Цвет | Смысл |
@@ -35,7 +40,7 @@
 ## Переходы статусов
 
 ```
-queued → in-progress → review → done
+queued → in-progress → review → tested → done
                   ↓           ↓
                blocked     failed
 ```
