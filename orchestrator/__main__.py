@@ -5,6 +5,9 @@
   python -m orchestrator run-next  — взять старейшую queued, прогнать бота, двинуть статус.
   python -m orchestrator supersede  — пометить задачу перекрытой более поздним решением.
   python -m orchestrator closeout   — проверить чеклист закрытия и (по --confirm) поставить done.
+  python -m orchestrator runs       — прогоны, состояние которых сохранено.
+  python -m orchestrator events     — журнал событий прогона.
+  python -m orchestrator ack        — подтвердить событие, ждущее ACK.
 
 Бэкенд очереди (GitHub/Forgejo) и токен — см. config.py. Токен не печатается.
 """
@@ -20,6 +23,7 @@ from pathlib import Path
 from . import config
 from .adapters.local import run_bot
 from .core import SUPERSEDED_LABEL, StateStore, Task
+from .runstate import ManifestError, RunState, latest_runs, make_run_id
 
 # Дефолтный таймаут ручного запуска бота, секунды.
 _RUN_BOT_TIMEOUT = int(os.environ.get("BOTS_BOT_TIMEOUT", "2400"))
@@ -73,11 +77,35 @@ def cmd_run_bot(message: str | None, file: str | None, timeout: int) -> int:
         print("Ошибка: укажи --message или --file", file=sys.stderr)
         return 2
 
+    checkout = Path(config.CHECKOUT) if config.CHECKOUT else Path.cwd()
+    # Ручной прогон — тоже прогон: манифест и журнал ведутся так же.
+    run = _open_run(os.environ.get("BOTS_ROLE", "manual"), checkout)
+    if run is not None:
+        run.record("run-started", sender="operator",
+                   summary="ручной запуск (run-bot)", dedupe_key="start")
+        print(f"Состояние прогона: {run.dir}")
+
     try:
-        result = run_bot(brief, cwd=(Path(config.CHECKOUT) if config.CHECKOUT else Path.cwd()), timeout=timeout)
+        result = run_bot(brief, cwd=checkout, timeout=timeout)
     except TimeoutError as exc:
         print(f"Ошибка: {exc}", file=sys.stderr)
+        if run is not None:
+            run.record("bot-result", sender="bot", severity="warning",
+                       summary="таймаут при ручном запуске", dedupe_key="timeout")
+            run.close()
         return 1
+
+    if run is not None:
+        log_ref = _save_bot_log(run, result)
+        run.record("bot-result", sender="bot",
+                   severity="info" if result.ok else "warning",
+                   summary=(f"ok={result.ok} subtype={result.subtype} "
+                            f"cost={result.cost_usd} turns={result.num_turns}"),
+                   payload_ref=log_ref, dedupe_key="result")
+        run.record("run-finished", sender="orchestrator",
+                   summary=f"ручной прогон завершён, ok={result.ok}",
+                   dedupe_key="finish")
+        run.close()
 
     print(result.output, end="" if result.output.endswith("\n") else "\n")
     print(f"exit_code={result.exit_code} ok={result.ok} subtype={result.subtype}")
@@ -178,6 +206,19 @@ def cmd_run_next(timeout: int) -> int:
         task = Task.from_issue(issue)
         print(f"Беру #{task.number}: {task.title}")
 
+        checkout = Path(config.CHECKOUT) if config.CHECKOUT else Path.cwd()
+        run = _open_run(os.environ.get("BOTS_ROLE", "unknown"), checkout)
+        if run is not None:
+            # СНАЧАЛА ЗАПИСЬ, ПОТОМ СИГНАЛ: событие ложится в журнал до того,
+            # как мы что-то меняем на доске.
+            run.record("run-started", sender="orchestrator",
+                       summary=f"#{task.number} {task.title}",
+                       dedupe_key=f"start-{task.number}")
+            run.record("status-changed", sender="orchestrator",
+                       summary=f"#{task.number}: queued -> in-progress",
+                       dedupe_key=f"inprogress-{task.number}")
+            print(f"Состояние прогона: {run.dir}")
+
         # queued -> in-progress
         try:
             client.set_status(task.number, "in-progress")
@@ -196,19 +237,76 @@ def cmd_run_next(timeout: int) -> int:
             result = run_bot(brief, cwd=(Path(config.CHECKOUT) if config.CHECKOUT else Path.cwd()), timeout=timeout)
         except TimeoutError as exc:
             print(f"Ошибка: {exc}", file=sys.stderr)
+            if run is not None:
+                run.record("bot-result", sender="bot", severity="warning",
+                           summary="таймаут: бот не завершился за отведённое время",
+                           dedupe_key=f"timeout-{task.number}")
             _finalize(client, store, task, new_status="failed", result=None,
                       note="бот не завершился за отведённое время (timeout)")
             return 1
 
         new_status = "review" if result.ok else "failed"
+        if run is not None:
+            log_ref = _save_bot_log(run, result)
+            run.record("bot-result", sender="bot",
+                       severity="info" if result.ok else "warning",
+                       summary=(f"ok={result.ok} subtype={result.subtype} "
+                                f"cost={result.cost_usd} turns={result.num_turns}"),
+                       payload_ref=log_ref,
+                       dedupe_key=f"result-{task.number}")
+            run.record("status-changed", sender="orchestrator",
+                       summary=f"#{task.number}: in-progress -> {new_status}",
+                       dedupe_key=f"{new_status}-{task.number}")
         _finalize(client, store, task, new_status=new_status, result=result, note=None)
         extra = f", subtype={result.subtype}" if result.subtype else ""
         cost = f", cost=${result.cost_usd:.4f}" if result.cost_usd is not None else ""
         print(f"#{task.number}: exit_code={result.exit_code} ok={result.ok} "
               f"→ status:{new_status}{extra}{cost}")
+        if run is not None:
+            run.record("run-finished", sender="orchestrator",
+                       summary=f"#{task.number} -> status:{new_status}",
+                       dedupe_key=f"finish-{task.number}")
+            pending = run.pending_ack()
+            if pending:
+                print(f"⚠ Ждут подтверждения (ACK) событий: {len(pending)} — "
+                      f"прогон не считается закрытым")
+            run.close()
         return 0 if result.ok else 1
     finally:
         store.close()
+
+
+def _open_run(role: str, checkout: Path) -> RunState | None:
+    """Готовит каталог состояния прогона и манифест. None — если не удалось.
+
+    Сбой здесь НЕ валит прогон: состояние — это наблюдаемость, а не условие
+    работы. Но и молча не теряется — предупреждение печатается.
+    """
+    try:
+        run_id = os.environ.get("BOTS_RUN_ID") or make_run_id(config.REPO, role)
+        run = RunState(run_id)
+        code, head = _git(checkout, "rev-parse", "HEAD")
+        run.write_manifest(
+            repo=config.REPO, role=role, node=os.uname().nodename if hasattr(os, "uname") else "",
+            base_sha=head.strip() if code == 0 else "",
+            checkout=str(checkout), backend=config.BACKEND,
+        )
+        return run
+    except (ManifestError, OSError, Exception) as exc:  # noqa: BLE001
+        print(f"Предупреждение: состояние прогона не создано: {exc}", file=sys.stderr)
+        return None
+
+
+def _save_bot_log(run: RunState | None, result) -> str | None:
+    """Сырой вывод бота — в каталог прогона; в событие идёт только ссылка."""
+    if run is None or result is None:
+        return None
+    try:
+        path = run.dir / "bot.log"
+        path.write_text(result.raw or result.output or "", encoding="utf-8")
+        return str(path.name)
+    except OSError:
+        return None
 
 
 def _git(repo: Path, *args: str) -> tuple[int, str]:
@@ -365,6 +463,57 @@ def cmd_closeout(number: int, artifact: str, confirm: bool) -> int:
     return 0
 
 
+def cmd_runs(limit: int) -> int:
+    runs = latest_runs(limit)
+    if not runs:
+        print("Сохранённых прогонов нет.")
+        return 0
+    print(f"Прогоны (новые сверху), всего показано {len(runs)}:")
+    for run_id in runs:
+        print(f"  {run_id}")
+    return 0
+
+
+def cmd_events(run_id: str) -> int:
+    try:
+        run = RunState(run_id)
+    except OSError as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 1
+    events = run.events()
+    manifest = run.manifest()
+    if manifest:
+        print(f"{run_id}: repo={manifest.get('repo')} role={manifest.get('role')} "
+              f"base={str(manifest.get('base_sha'))[:12]}")
+    if not events:
+        print("  событий нет")
+    for e in events:
+        ack = ""
+        if e["requires_ack"]:
+            ack = f"  [ACK {e['state']}" + (f" by {e['ack_by']}" if e["ack_by"] else " ЖДЁТ") + "]"
+        print(f"  {e['created_at']}  {e['kind']:<14} {e['severity']:<8} "
+              f"{e['event_id']}{ack}\n      {e['summary']}")
+    run.close()
+    return 0
+
+
+def cmd_ack(run_id: str, event_id: str, by: str) -> int:
+    """ACK = «получил и принял ответственность», не «согласен» и не «готово»."""
+    try:
+        run = RunState(run_id)
+    except OSError as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 1
+    done = run.ack(event_id, by)
+    run.close()
+    if done:
+        print(f"{event_id}: ACK от {by}")
+        return 0
+    print(f"{event_id}: ACK не поставлен (нет события или оно уже подтверждено)",
+          file=sys.stderr)
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -405,6 +554,17 @@ def main(argv: list[str] | None = None) -> int:
     p_clo.add_argument("--confirm", action="store_true",
                        help="при пройденном чеклисте поставить status:done")
 
+    p_runs = sub.add_parser("runs", help="прогоны с сохранённым состоянием")
+    p_runs.add_argument("--limit", type=int, default=10)
+
+    p_ev = sub.add_parser("events", help="журнал событий прогона")
+    p_ev.add_argument("run_id")
+
+    p_ack = sub.add_parser("ack", help="подтвердить событие (получил и принял ответственность)")
+    p_ack.add_argument("run_id")
+    p_ack.add_argument("event_id")
+    p_ack.add_argument("--by", required=True, help="кто подтверждает")
+
     args = parser.parse_args(argv)
 
     if args.command == "list":
@@ -417,6 +577,12 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_supersede(args.number, args.by)
     if args.command == "closeout":
         return cmd_closeout(args.number, args.artifact, args.confirm)
+    if args.command == "runs":
+        return cmd_runs(args.limit)
+    if args.command == "events":
+        return cmd_events(args.run_id)
+    if args.command == "ack":
+        return cmd_ack(args.run_id, args.event_id, args.by)
     parser.print_help()
     return 0
 

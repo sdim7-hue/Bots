@@ -65,5 +65,11 @@ grep -q "^CLAUDE.local.md$" "$GATE/.gitignore" 2>/dev/null || true
 # имеющий запись в гейт, может подменить код оркестратора для следующего
 # прогона — то есть выполнить код ВНЕ песочницы. Каталог бота передаётся
 # переменной BOTS_CHECKOUT (config.CHECKOUT), её читает run_bot.
+# Идентификатор прогона задаётся ЗДЕСЬ, один на весь прогон: иначе предполёт,
+# оркестратор и журнал говорили бы о разных прогонах.
+RUN_ID="${BOTS_RUN_ID:-$REPO-$(date +%Y%m%d-%H%M%S)-$ROLE}"
+echo "run-id: $RUN_ID"
+
 cd "$BOTS_DIR"
-env PYTHONPATH="$BOTS_DIR" BOTS_CHECKOUT="$GATE" python3 -P -m orchestrator "$@"
+env PYTHONPATH="$BOTS_DIR" BOTS_CHECKOUT="$GATE" BOTS_ROLE="$ROLE" \
+    BOTS_RUN_ID="$RUN_ID" python3 -P -m orchestrator "$@"
