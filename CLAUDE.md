@@ -40,3 +40,34 @@
 
 СТОП и эскалируй с фактами (ссылки на код: файл:строка), не выполняй слепо. Отказ выполнить
 неверную инструкцию с обоснованием — это правильно, а не сбой.
+
+## ⚠ ДВА РЕМОУТА — пушить в ОБА (иначе репозиторий разъезжается)
+
+У этого репозитория **два хостинга и нет автоматического зеркала**:
+
+| Remote | Адрес | Роль |
+|---|---|---|
+| `gh` | `https://github.com/sdim7-hue/Bots.git` | **primary** |
+| `origin` | `https://192.168.80.127/git/dimir/Bots.git` | копия + доска задач (issues, метки `status:*`) |
+
+Push-зеркало Forgejo→GitHub **сознательно удалено** (иначе затирало бы коммиты ботов),
+поэтому синхронизация — ручная. 14.09.2026 из-за этого линии разъехались на 9 и 5 коммитов
+(playbook `bots.md` L87/L88): роль-пак и предполёт ушли только в Forgejo, а `observer/` и
+фиксы запуска жили только в GitHub.
+
+**Перед работой:**
+
+    git fetch origin && git fetch gh
+    git rev-list --left-right --count gh/main...origin/main   # должно быть 0 0
+
+Ненулевые числа = линии разъехались, СНАЧАЛА свести, потом коммитить.
+
+**После коммита — в оба:**
+
+    git push origin main && git push gh main
+
+Если на узле нет ремоута `gh`: `git remote add gh https://github.com/sdim7-hue/Bots.git`.
+Токен GitHub на Ubuntu-узлах лежит в `~/.config/Claude/claude_desktop_config.json`
+(`mcpServers.github.env.GITHUB_PERSONAL_ACCESS_TOKEN`); подавать одноразовым URL
+`https://x-access-token:<tok>@github.com/...`, НЕ через `remote set-url` — иначе токен
+осядет в `.git/config`.
