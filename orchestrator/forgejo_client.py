@@ -123,6 +123,22 @@ class ForgejoClient:
             method="PUT", data={"labels": kept_ids + [status_id]},
         )
 
+    def add_label(self, issue_number: int, name: str) -> None:
+        """Добавляет метку, СОХРАНЯЯ все прочие (в т.ч. status:*).
+
+        В отличие от set_status ничего не снимает: нужно для маркеров вроде
+        `superseded`, которые живут параллельно статусу.
+        """
+        issue = self.get_issue(issue_number)
+        current = [lbl["id"] for lbl in issue.get("labels", [])]
+        label_id = self._ensure_label(name)
+        if label_id in current:
+            return
+        self._request(
+            "/repos/%s/%s/issues/%s/labels" % (self._owner, self._repo, issue_number),
+            method="PUT", data={"labels": current + [label_id]},
+        )
+
     def add_comment(self, issue_number: int, body: str) -> None:
         """Добавляет комментарий к issue."""
         self._request(
