@@ -8,6 +8,8 @@
   python -m orchestrator runs       — прогоны, состояние которых сохранено.
   python -m orchestrator events     — журнал событий прогона.
   python -m orchestrator ack        — подтвердить событие, ждущее ACK.
+  python -m orchestrator handoff    — снять патч гейта по base SHA (ждёт ACK ревьюера).
+  python -m orchestrator integrate  — влить ИМЕННО проверенный патч по его sha256.
 
 Бэкенд очереди (GitHub/Forgejo) и токен — см. config.py. Токен не печатается.
 """
@@ -23,6 +25,7 @@ from pathlib import Path
 from . import config
 from .adapters.local import run_bot
 from .core import SUPERSEDED_LABEL, StateStore, Task
+from .handoff import HandoffError, apply_patch, make_patch, sha256_of
 from .runstate import ManifestError, RunState, latest_runs, make_run_id
 
 # Дефолтный таймаут ручного запуска бота, секунды.
@@ -463,6 +466,120 @@ def cmd_closeout(number: int, artifact: str, confirm: bool) -> int:
     return 0
 
 
+def cmd_handoff(run_id: str) -> int:
+    """Снимает патч гейта относительно base SHA из манифеста прогона.
+
+    Событие требует ACK: без подтверждения ревьюера integrate работать не будет.
+    """
+    try:
+        run = RunState(run_id)
+    except OSError as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 1
+    manifest = run.manifest()
+    base = str(manifest.get("base_sha", ""))
+    gate = Path(manifest.get("checkout") or "")
+    if not base or not gate.is_dir():
+        print("Ошибка: в манифесте прогона нет base_sha/checkout", file=sys.stderr)
+        run.close()
+        return 1
+
+    patch_path = run.evidence / "handoff.patch"
+    try:
+        size, digest, files = make_patch(gate, base, patch_path)
+    except HandoffError as exc:
+        print(f"Ошибка передачи: {exc}", file=sys.stderr)
+        run.close()
+        return 1
+
+    event = run.record(
+        "handoff", sender=manifest.get("role", "bot"), recipient="reviewer",
+        requires_ack=True, severity="warning",
+        summary=(f"патч {files} файл(ов), {size} байт; base={base}; "
+                 f"diff_sha256={digest}"),
+        payload_ref="evidence/handoff.patch", dedupe_key="handoff",
+    )
+    run.close()
+    print(f"handoff {event}: {files} файл(ов), {size} байт")
+    print(f"  base        : {base}")
+    print(f"  diff_sha256 : {digest}")
+    print(f"  патч        : {patch_path}")
+    print("Дальше: ревьюер смотрит ИМЕННО этот патч, затем")
+    print(f"  orchestrator ack {run_id} {event} --by reviewer")
+    print(f"  orchestrator integrate {run_id} --handoff {event} --diff-sha256 {digest}")
+    return 0
+
+
+def cmd_integrate(run_id: str, handoff_id: str, diff_sha256: str,
+                  branch: str | None) -> int:
+    """Переносит ИМЕННО проверенный патч. Ни ветка, ни текущий гейт не источник."""
+    try:
+        run = RunState(run_id)
+    except OSError as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 1
+
+    event = next((e for e in run.events(limit=500) if e["event_id"] == handoff_id), None)
+    if event is None or event["kind"] != "handoff":
+        print(f"Ошибка: в прогоне нет события handoff {handoff_id}", file=sys.stderr)
+        run.close()
+        return 1
+    if event["state"] != "acked":
+        print("Ошибка: передача не подтверждена ревьюером (нет ACK). "
+              f"Сначала: orchestrator ack {run_id} {handoff_id} --by <кто>",
+              file=sys.stderr)
+        run.close()
+        return 1
+
+    patch_path = run.dir / (event["payload_ref"] or "evidence/handoff.patch")
+    if not patch_path.is_file():
+        print(f"Ошибка: патч не найден: {patch_path}", file=sys.stderr)
+        run.close()
+        return 1
+
+    # Хэш сверяется И с записанным в событии, И с фактическим файлом: иначе
+    # подменённый на диске патч прошёл бы по совпадению с аргументом.
+    actual = sha256_of(patch_path)
+    recorded = ""
+    for part in (event["summary"] or "").split():
+        if part.startswith("diff_sha256="):
+            recorded = part.split("=", 1)[1]
+    if actual != diff_sha256:
+        print(f"Ошибка: sha256 патча не совпал с указанным\n  файл    : {actual}\n"
+              f"  указан  : {diff_sha256}", file=sys.stderr)
+        run.close()
+        return 1
+    if recorded and recorded != actual:
+        print(f"Ошибка: sha256 патча не совпал с записанным в событии\n"
+              f"  файл     : {actual}\n  в событии: {recorded}", file=sys.stderr)
+        run.close()
+        return 1
+
+    manifest = run.manifest()
+    base = str(manifest.get("base_sha", ""))
+    src = Path.home() / "work" / config.REPO
+    target_branch = branch or f"integrate/{run_id}"
+    message = (f"integrate {run_id}: handoff {handoff_id}\n\n"
+               f"base {base}\ndiff_sha256 {actual}\n"
+               f"Влит проверенный патч, не branch head (playbook L93).")
+    try:
+        commit = apply_patch(src, base, patch_path, target_branch, message)
+    except HandoffError as exc:
+        print(f"Ошибка вливания: {exc}", file=sys.stderr)
+        run.close()
+        return 1
+
+    run.record("integrated", sender="operator", reply_to=handoff_id,
+               summary=f"ветка {target_branch} коммит {commit} diff_sha256={actual}",
+               dedupe_key=f"integrated-{handoff_id}")
+    run.close()
+    print(f"Влито в ветку {target_branch}, коммит {commit}")
+    print(f"  база        : {base[:12]}  (патч применён НА БАЗУ, не на текущий main)")
+    print(f"  diff_sha256 : {actual}")
+    print("Пуш и слияние НЕ делались — это решение владельца.")
+    return 0
+
+
 def cmd_runs(limit: int) -> int:
     runs = latest_runs(limit)
     if not runs:
@@ -565,6 +682,16 @@ def main(argv: list[str] | None = None) -> int:
     p_ack.add_argument("event_id")
     p_ack.add_argument("--by", required=True, help="кто подтверждает")
 
+    p_ho = sub.add_parser("handoff", help="снять патч гейта по base SHA (потребует ACK)")
+    p_ho.add_argument("run_id")
+
+    p_int = sub.add_parser("integrate", help="влить ИМЕННО проверенный патч по sha256")
+    p_int.add_argument("run_id")
+    p_int.add_argument("--handoff", required=True, help="event_id передачи")
+    p_int.add_argument("--diff-sha256", required=True, dest="diff_sha256",
+                       help="ожидаемый sha256 патча")
+    p_int.add_argument("--branch", help="имя ветки (по умолчанию integrate/<run-id>)")
+
     args = parser.parse_args(argv)
 
     if args.command == "list":
@@ -583,6 +710,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_events(args.run_id)
     if args.command == "ack":
         return cmd_ack(args.run_id, args.event_id, args.by)
+    if args.command == "handoff":
+        return cmd_handoff(args.run_id)
+    if args.command == "integrate":
+        return cmd_integrate(args.run_id, args.handoff, args.diff_sha256, args.branch)
     parser.print_help()
     return 0
 

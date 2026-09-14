@@ -41,7 +41,7 @@ KINDS = (
     "run-started", "run-finished",
     "bot-result", "status-changed",
     "blocked", "needs-human",
-    "handoff", "review-result", "test-result",
+    "handoff", "review-result", "test-result", "integrated",
     "closeout", "superseded",
     "critical",
 )
