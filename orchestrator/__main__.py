@@ -3,6 +3,8 @@
   python -m orchestrator list      — показать очередь задач со статусом queued.
   python -m orchestrator run-bot   — вручную запустить бота с брифом (проверка адаптера).
   python -m orchestrator run-next  — взять старейшую queued, прогнать бота, двинуть статус.
+  python -m orchestrator supersede  — пометить задачу перекрытой более поздним решением.
+  python -m orchestrator closeout   — проверить чеклист закрытия и (по --confirm) поставить done.
 
 Бэкенд очереди (GitHub/Forgejo) и токен — см. config.py. Токен не печатается.
 """
@@ -17,13 +19,16 @@ from pathlib import Path
 
 from . import config
 from .adapters.local import run_bot
-from .core import StateStore, Task
+from .core import SUPERSEDED_LABEL, StateStore, Task
 
 # Дефолтный таймаут ручного запуска бота, секунды.
 _RUN_BOT_TIMEOUT = int(os.environ.get("BOTS_BOT_TIMEOUT", "2400"))
 
 # Максимальная длина вывода бота, попадающего в комментарий issue.
 _COMMENT_OUTPUT_LIMIT = 1500
+
+# Что в гейте кладёт сам раннер/сборка — при closeout не считается «неубранным».
+_GATE_EXPECTED = {"CLAUDE.local.md", "node_modules", ".bot-run.lock"}
 
 
 def cmd_list() -> int:
@@ -50,7 +55,8 @@ def cmd_list() -> int:
     print("-" * len(header))
     for task in sorted(tasks, key=lambda t: t.number):
         type_part = f" [{task.type}]" if task.type else ""
-        print(f"  #{task.number}{type_part} {task.title}")
+        mark = "  (superseded — не берётся)" if task.superseded else ""
+        print(f"  #{task.number}{type_part} {task.title}{mark}")
     return 0
 
 
@@ -157,8 +163,18 @@ def cmd_run_next(timeout: int) -> int:
             print("Очередь queued пуста — нечего запускать.")
             return 0
 
+        # Перекрытые более поздним решением не берём: промежуточный HOLD не
+        # должен снова притягиваться как активная работа при холодном старте.
+        fresh = [it for it in issues if not Task.from_issue(it).superseded]
+        skipped = len(issues) - len(fresh)
+        if skipped:
+            print(f"Пропущено superseded: {skipped}")
+        if not fresh:
+            print("В очереди только superseded задачи — нечего запускать.")
+            return 0
+
         # Старейшая задача — с наименьшим номером issue.
-        issue = min(issues, key=lambda it: it["number"])
+        issue = min(fresh, key=lambda it: it["number"])
         task = Task.from_issue(issue)
         print(f"Беру #{task.number}: {task.title}")
 
@@ -195,6 +211,160 @@ def cmd_run_next(timeout: int) -> int:
         store.close()
 
 
+def _git(repo: Path, *args: str) -> tuple[int, str]:
+    """Запускает git в указанном репозитории. Возвращает (код, вывод)."""
+    proc = subprocess.run(
+        ["git", "-C", str(repo), *args],
+        capture_output=True, text=True,
+    )
+    return proc.returncode, (proc.stdout + proc.stderr).strip()
+
+
+def cmd_supersede(number: int, by: str) -> int:
+    """Помечает задачу перекрытой более поздним решением.
+
+    Метка `superseded` живёт параллельно статусу; ссылка на то, ЧЕМ перекрыто,
+    обязательна и пишется комментарием — метка значение нести не может.
+    """
+    by = (by or "").strip()
+    if not by:
+        print("Ошибка: --by обязателен (issue, коммит или вердикт)", file=sys.stderr)
+        return 2
+    try:
+        client = config.make_client()
+    except RuntimeError as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 2
+    try:
+        client.add_label(number, SUPERSEDED_LABEL)
+        client.add_comment(number, f"superseded-by: {by}")
+    except config.client_errors() as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 1
+    print(f"#{number}: помечена superseded, superseded-by: {by}")
+    return 0
+
+
+def cmd_closeout(number: int, artifact: str, confirm: bool) -> int:
+    """Чеклист закрытия задачи. Без --confirm ничего не меняет.
+
+    Проверяет механически то, что можно проверить, и НЕ ставит done при любом
+    FAIL. Это ворота, а не отчёт: «done» означает, что чеклист пройден.
+    """
+    src = Path.home() / "work" / config.REPO
+    gate = Path.home() / "work" / "gates" / config.REPO
+    fails: list[str] = []
+    lines: list[str] = []
+
+    def ok(msg: str) -> None:
+        print(f"  OK    {msg}"); lines.append(f"- OK: {msg}")
+
+    def bad(msg: str) -> None:
+        print(f"  FAIL  {msg}"); lines.append(f"- FAIL: {msg}"); fails.append(msg)
+
+    print(f"closeout #{number} ({config.OWNER}/{config.REPO})")
+
+    # 1. артефакт — точный 40-символьный SHA, существующий в каноническом клоне
+    art = (artifact or "").strip()
+    if len(art) != 40 or not all(c in "0123456789abcdef" for c in art.lower()):
+        bad("артефакт не точный 40-символьный SHA")
+        art = ""
+    elif not src.joinpath(".git").exists():
+        bad(f"нет канонического клона {src}")
+        art = ""
+    elif _git(src, "cat-file", "-e", art + "^{commit}")[0] != 0:
+        bad(f"коммит {art[:12]} не найден в {src}")
+        art = ""
+    else:
+        ok(f"артефакт {art}")
+
+    # 2. артефакт доступен в remote — принятое не должно жить только локально
+    if art:
+        if _git(src, "fetch", "-q", "origin")[0] != 0:
+            bad("не удалось fetch origin — доступность в remote не доказана")
+        elif _git(src, "merge-base", "--is-ancestor", art, "origin/main")[0] == 0:
+            ok("артефакт присутствует в origin/main")
+        else:
+            bad("артефакт НЕ в origin/main (принятое не опубликовано)")
+
+    # 3. гейт убран: нет незакоммиченного и нет залипшего локфайла.
+    # Служебное, что кладёт сам раннер, неубранным НЕ считается.
+    if gate.joinpath(".git").exists():
+        code, out = _git(gate, "status", "--porcelain")
+        if code != 0:
+            bad(f"не читается состояние гейта: {out[:80]}")
+        else:
+            leftovers = [
+                ln for ln in out.splitlines()
+                if ln[3:].strip().strip("/") not in _GATE_EXPECTED
+            ]
+            if leftovers:
+                names = ", ".join(ln[3:].strip() for ln in leftovers[:5])
+                bad(f"в гейте {len(leftovers)} неубранных артефактов: {names}")
+            else:
+                ok("гейт чист (кроме служебного)")
+        lock = gate / ".bot-run.lock"
+        if lock.exists():
+            pid = lock.read_text().strip()
+            alive = False
+            try:
+                os.kill(int(pid), 0); alive = True
+            except (ValueError, ProcessLookupError):
+                alive = False
+            except PermissionError:
+                alive = True
+            if alive:
+                bad(f"на гейте идёт прогон (PID {pid}) — закрывать нельзя")
+            else:
+                bad(f"залипший локфайл (PID {pid} мёртв) — убрать перед закрытием")
+        else:
+            ok("прогонов на гейте нет")
+    else:
+        ok("гейта нет (нечего убирать)")
+
+    # 4. статус и маркеры самой задачи
+    try:
+        client = config.make_client()
+        issue = client.get_issue(number)
+    except (RuntimeError, *config.client_errors()) as exc:
+        print(f"Ошибка: {exc}", file=sys.stderr)
+        return 1
+    task = Task.from_issue(issue)
+    if task.status in ("review", "tested"):
+        ok(f"статус status:{task.status} — закрытие уместно")
+    elif task.status == "done":
+        bad("задача уже status:done")
+    else:
+        bad(f"статус status:{task.status} — работа не доведена до ревью/тестов")
+    if task.superseded:
+        bad("на задаче маркер superseded — закрывать как done нельзя")
+    else:
+        ok("маркера superseded нет")
+
+    print(f"closeout: FAIL={len(fails)}")
+    if fails:
+        print("done НЕ ставится")
+        return 1
+    if not confirm:
+        print("чеклист пройден; для закрытия повторить с --confirm")
+        return 0
+
+    body = (
+        f"Closeout #{number}.\n\n"
+        f"Канонический артефакт: `{art}`\n\n"
+        "Чеклист:\n" + "\n".join(lines) +
+        "\n\nПринятые изменения доступны в remote; временные артефакты гейта убраны."
+    )
+    try:
+        client.set_status(number, "done")
+        client.add_comment(number, body)
+    except config.client_errors() as exc:
+        print(f"Ошибка при закрытии: {exc}", file=sys.stderr)
+        return 1
+    print(f"#{number} → status:done (артефакт {art[:12]})")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     try:
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
@@ -223,6 +393,18 @@ def main(argv: list[str] | None = None) -> int:
         help=f"таймаут запуска бота, секунды (по умолчанию {_RUN_BOT_TIMEOUT})",
     )
 
+    p_sup = sub.add_parser("supersede", help="пометить задачу перекрытой более поздним решением")
+    p_sup.add_argument("number", type=int, help="номер issue")
+    p_sup.add_argument("--by", required=True,
+                       help="чем перекрыто: issue, коммит или вердикт (обязательно)")
+
+    p_clo = sub.add_parser("closeout", help="чеклист закрытия; без --confirm ничего не меняет")
+    p_clo.add_argument("number", type=int, help="номер issue")
+    p_clo.add_argument("--artifact", required=True,
+                       help="канонический артефакт — точный 40-символьный SHA")
+    p_clo.add_argument("--confirm", action="store_true",
+                       help="при пройденном чеклисте поставить status:done")
+
     args = parser.parse_args(argv)
 
     if args.command == "list":
@@ -231,6 +413,10 @@ def main(argv: list[str] | None = None) -> int:
         return cmd_run_bot(args.message, args.file, args.timeout)
     if args.command == "run-next":
         return cmd_run_next(args.timeout)
+    if args.command == "supersede":
+        return cmd_supersede(args.number, args.by)
+    if args.command == "closeout":
+        return cmd_closeout(args.number, args.artifact, args.confirm)
     parser.print_help()
     return 0
 

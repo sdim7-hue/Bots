@@ -14,6 +14,11 @@ from pathlib import Path
 _STATUS_PREFIX = "status:"
 _TYPE_PREFIX = "type:"
 
+# Маркер «перекрыто более поздним решением» (см. docs/labels.md, раздел Closeout).
+# Живёт ПАРАЛЛЕЛЬНО статусу: промежуточный HOLD с этим маркером при холодном
+# старте не считается активной работой.
+SUPERSEDED_LABEL = "superseded"
+
 
 @dataclass
 class Task:
@@ -22,6 +27,10 @@ class Task:
     status: str | None
     type: str | None
     labels: list[str]
+
+    @property
+    def superseded(self) -> bool:
+        return SUPERSEDED_LABEL in self.labels
 
     @classmethod
     def from_issue(cls, issue: dict) -> "Task":

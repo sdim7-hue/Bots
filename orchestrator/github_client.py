@@ -88,6 +88,13 @@ class GitHubClient:
             data={"labels": kept},
         )
 
+    def add_label(self, issue_number: int, name: str) -> None:
+        """Добавляет метку, сохраняя прочие (GitHub добавляет по имени)."""
+        self._request(
+            "/repos/%s/%s/issues/%s/labels" % (self._owner, self._repo, issue_number),
+            method="POST", data={"labels": [name]},
+        )
+
     def add_comment(self, issue_number: int, body: str) -> None:
         """Добавляет комментарий к issue."""
         self._request(
