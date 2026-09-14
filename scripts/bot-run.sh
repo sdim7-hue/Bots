@@ -58,5 +58,12 @@ trap 'rm -f "$LOCK"' EXIT INT TERM
 
 cp "$BOTS_DIR/roles/$ROLE.md" "$GATE/CLAUDE.local.md"
 grep -q "^CLAUDE.local.md$" "$GATE/.gitignore" 2>/dev/null || true
-cd "$GATE"
-env PYTHONPATH="$BOTS_DIR" python3 -m orchestrator "$@"
+# ⚠ НЕ делать `cd "$GATE"` перед запуском оркестратора. При `python -m` в
+# sys.path[0] попадает cwd, а гейт — клон этого же репозитория, значит его
+# КОПИЯ `orchestrator/` перекрывает настоящую. Последствия: (1) правки раннера
+# не применяются (ловилось смоуком песочницы 14.09, playbook L91), (2) бот,
+# имеющий запись в гейт, может подменить код оркестратора для следующего
+# прогона — то есть выполнить код ВНЕ песочницы. Каталог бота передаётся
+# переменной BOTS_CHECKOUT (config.CHECKOUT), её читает run_bot.
+cd "$BOTS_DIR"
+env PYTHONPATH="$BOTS_DIR" BOTS_CHECKOUT="$GATE" python3 -P -m orchestrator "$@"

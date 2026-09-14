@@ -4,10 +4,15 @@
 завершения и возвращает результат. ОС-зависимость (поиск `claude`/`claude.cmd`)
 локализована здесь; ядро остаётся OS-агностичным.
 
-Режим разрешений: acceptEdits — бот может читать и создавать/править файлы,
-но shell (Bash) и прочие side-effect инструменты остаются под запретом
-(headless без TTY их не подтвердит). Осознанный least-privilege старт;
-расширение прав (scoped Bash и т.п.) — отдельным решением (см. L52).
+Режим разрешений: bypassPermissions. Это НЕ ослабление защиты, а следствие
+того, где стоит граница: флаги разрешений Claude Code обходятся через
+подключённые MCP, поэтому полагаться на них нельзя (playbook L53-доп10).
+Граница — механическая и двухслойная:
+  1) gate-clone без remote и без credential.helper (запушить нельзя);
+  2) ОС-песочница scripts/sandbox-run.sh — хост read-only, запись только в
+     гейт, cgroup-лимиты (playbook import-ai-ops B4).
+Запрещена не работа с внешним миром, а бесконтрольная локальная запись.
+Отключение песочницы: BOTS_SANDBOX=0 (только отладка).
 """
 
 from __future__ import annotations
@@ -22,6 +27,9 @@ from pathlib import Path
 
 # Режим разрешений Claude Code для headless-бота (см. docstring модуля).
 _PERMISSION_MODE = "bypassPermissions"
+
+# Обёртка ОС-песочницы: <repo>/scripts/sandbox-run.sh
+_SANDBOX_SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "sandbox-run.sh"
 
 
 @dataclass
@@ -62,6 +70,28 @@ def _find_claude() -> str:
     return candidates[0]
 
 
+def _sandbox_prefix(cwd: Path) -> list[str]:
+    """Префикс команды для запуска бота в ОС-песочнице.
+
+    Пустой список = запуск без песочницы. Так и должно быть на Windows
+    (bwrap там нет; офисный узел границу держит только gate-clone) и при
+    явном BOTS_SANDBOX=0. В остальных случаях отсутствие песочницы —
+    не молчаливый фолбэк: печатаем предупреждение, чтобы это было видно.
+    """
+    if os.environ.get("BOTS_SANDBOX") == "0":
+        return []
+    if os.name == "nt":
+        return []
+    if not _SANDBOX_SCRIPT.is_file():
+        print(f"Предупреждение: нет {_SANDBOX_SCRIPT} — бот пойдёт БЕЗ ОС-песочницы")
+        return []
+    if shutil.which("bwrap") is None:
+        print("Предупреждение: нет bwrap — бот пойдёт БЕЗ ОС-песочницы "
+              "(поставить: sudo apt install bubblewrap)")
+        return []
+    return [str(_SANDBOX_SCRIPT), str(cwd)]
+
+
 def _parse_result(raw: str) -> dict:
     """Разбирает JSON-вывод `claude -p --output-format json`.
 
@@ -96,7 +126,9 @@ def run_bot(brief: str, cwd: Path, timeout: int) -> BotResult:
     do not pile up. Success is judged by the JSON subtype, not the exit code (a long
     successful run can still exit nonzero)."""
     claude = _find_claude()
-    cmd = [claude, "-p", "--permission-mode", _PERMISSION_MODE, "--output-format", "json"]
+    cmd = _sandbox_prefix(cwd) + [
+        claude, "-p", "--permission-mode", _PERMISSION_MODE, "--output-format", "json",
+    ]
 
     popen_kwargs = dict(
         cwd=str(cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,

@@ -90,6 +90,44 @@ if command -v claude >/dev/null 2>&1; then
   else fail "claude -p ping не прошёл — OAuth истёк, нужен /login (или ANTHROPIC_API_KEY)"; fi
 else fail "бинарь claude не найден в PATH"; fi
 
+# 9. ОС-песочница: граница записи ДОКАЗЫВАЕТСЯ пробой, а не наличием bwrap.
+#    Проверяется до запуска модели (import-ai-ops B4): запись в гейт разрешена,
+#    запись наружу и через symlink-побег — запрещена.
+if [ "${BOTS_SANDBOX:-1}" = "0" ]; then
+  warn "песочница отключена (BOTS_SANDBOX=0) — граница только gate-clone"
+elif ! command -v bwrap >/dev/null 2>&1; then
+  fail "нет bwrap — ОС-граница записи отсутствует (sudo apt install bubblewrap)"
+elif [ ! -x "$BOTS_DIR/scripts/sandbox-run.sh" ]; then
+  fail "нет исполняемого $BOTS_DIR/scripts/sandbox-run.sh"
+else
+  probe_gate="${GATE:-$HOME/work/gates/$REPO}"
+  mkdir -p "$probe_gate"
+  # symlink-побег: ссылка изнутри гейта наружу не должна давать запись
+  ln -sfn "$HOME" "$probe_gate/.pf-escape" 2>/dev/null
+  probe=$("$BOTS_DIR/scripts/sandbox-run.sh" "$probe_gate" /bin/sh -c '
+    touch .pf-probe 2>/dev/null && echo IN=ok || echo IN=denied
+    touch "$HOME/.pf-outside" 2>/dev/null && echo OUT=ok || echo OUT=denied
+    touch .pf-escape/.pf-via-link 2>/dev/null && echo LINK=ok || echo LINK=denied
+  ' 2>/dev/null)
+  rm -f "$probe_gate/.pf-probe" "$probe_gate/.pf-escape" "$HOME/.pf-outside" 2>/dev/null
+  case "$probe" in
+    *IN=ok*)   : ;;
+    *) fail "песочница не даёт писать в гейт — бот не сможет работать" ;;
+  esac
+  case "$probe" in
+    *OUT=ok*)  fail "ПРОБОЙ: из песочницы доступна запись в HOME" ;;
+    *) : ;;
+  esac
+  case "$probe" in
+    *LINK=ok*) fail "ПРОБОЙ: symlink из гейта даёт запись наружу" ;;
+    *) : ;;
+  esac
+  case "$probe" in
+    *IN=ok*OUT=denied*LINK=denied*) ok "граница записи доказана пробой (в гейт можно, наружу и через symlink нельзя)" ;;
+    *) : ;;
+  esac
+fi
+
 echo "pre-flight: FAIL=$fails WARN=$warns"
 [ "$fails" -eq 0 ] || { echo "прогон НЕ запускается"; exit 1; }
 exit 0
