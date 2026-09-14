@@ -58,6 +58,14 @@ def cmd_collect_once() -> int:
     return 0
 
 
+def _queue_remaining(snapshots) -> int:
+    """Сколько задач ещё ждёт работы — для строки «Осталось в очереди»."""
+    return sum(
+        1 for s in snapshots
+        if s.status in ("queued", "in-progress") and not getattr(s, "superseded", False)
+    )
+
+
 def cmd_notify_dry(include_done: bool) -> int:
     projects = _load_projects()
     snapshots = _collect_all(projects)
@@ -70,7 +78,10 @@ def cmd_notify_dry(include_done: bool) -> int:
     events = notifier.detect(prev, snapshots, include_done=include_done)
     channels = active_channels(force_console=True)
     # Dry-режим: без store -> без дедупа и без записи журнала/снимков.
-    sent = notifier.dispatch(events, [c for c in channels if c.name == "console"])
+    sent = notifier.dispatch(
+        events, [c for c in channels if c.name == "console"],
+        queue_remaining=_queue_remaining(snapshots),
+    )
     print(f"notify-dry: {sent} событий (снимок и журнал НЕ изменены)")
     return 0
 
@@ -92,7 +103,8 @@ def cmd_run(interval: int, include_done: bool) -> int:
             prev = store.load_snapshots()
             snapshots = _collect_all(projects)
             events = notifier.detect(prev, snapshots, include_done=include_done)
-            sent = notifier.dispatch(events, channels, store=store)
+            sent = notifier.dispatch(events, channels, store=store,
+                                     queue_remaining=_queue_remaining(snapshots))
             for snap in snapshots:
                 store.upsert_snapshot(snap)
             print(f"[run] {len(snapshots)} задач, {sent} новых уведомлений; "

@@ -9,7 +9,13 @@
 Дедуп — по (project, number, event_type, status): одно и то же состояние
 не уведомляется дважды (журнал event в state.sqlite).
 
-Каналы доставки выбираются по секретам в ENV (см. channels/).
+Каналы доставки выбираются по секретам в ENV (см. channels/); каждый обёрнут
+предохранителем (redact.py) — машинный дамп и секреты до владельца не доходят.
+
+ЧТО НЕ уведомляем (playbook import-ai-ops B7): промежуточный прогресс, idle,
+retry, неизменившиеся снимки, межботовые сообщения, логи, диффы, стектрейсы,
+секреты. Также не уведомляем задачи с маркером `superseded` — решение по ним
+перекрыто более поздним (bots.md L85), это не новость для владельца.
 """
 
 from __future__ import annotations
@@ -17,6 +23,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .collector import TaskSnapshot
+from .message import event_id, format_event
+from .redact import UnsafeMessage
 
 # Переходы статуса, требующие внимания человека (supervisory mode).
 _ATTENTION_STATUSES = ("review", "failed")
@@ -33,24 +41,12 @@ class Event:
     title: str
     url: str | None
 
-    def subject(self) -> str:
-        kind = {
-            "status:review": "на ревью",
-            "status:failed": "упала",
-            "needs:human": "нужен человек",
-            "status:done": "завершена",
-        }.get(self.event_type, self.event_type)
-        return f"[{self.project}] #{self.number} {kind}: {self.title}"
+    def event_id(self) -> str:
+        return event_id(self)
 
-    def body(self) -> str:
-        lines = [f"Проект: {self.project}",
-                 f"Задача: #{self.number} {self.title}",
-                 f"Событие: {self.event_type}"]
-        if self.status:
-            lines.append(f"Статус: {self.status}")
-        if self.url:
-            lines.append(f"Ссылка: {self.url}")
-        return "\n".join(lines)
+    def rendered(self, queue_remaining: int | None = None) -> tuple[str, str]:
+        """Человеческая форма сообщения (см. message.py)."""
+        return format_event(self, queue_remaining)
 
 
 def detect(prev: dict[tuple[str, int], TaskSnapshot],
@@ -63,6 +59,10 @@ def detect(prev: dict[tuple[str, int], TaskSnapshot],
     """
     events: list[Event] = []
     for snap in current:
+        # Перекрытые более поздним решением не уведомляем: для владельца это
+        # не переход состояния, а протухший HOLD (bots.md L85).
+        if getattr(snap, "superseded", False):
+            continue
         before = prev.get(snap.key())
         prev_status = before.status if before else None
         prev_needs_human = before.needs_human if before else False
@@ -90,7 +90,8 @@ def detect(prev: dict[tuple[str, int], TaskSnapshot],
     return events
 
 
-def dispatch(events: list[Event], channels: list, store=None) -> int:
+def dispatch(events: list[Event], channels: list, store=None,
+             queue_remaining: int | None = None) -> int:
     """Отправляет события по каналам с дедупликацией через journal событий.
 
     Если передан store — событие пропускается, если уже зафиксировано
@@ -105,15 +106,24 @@ def dispatch(events: list[Event], channels: list, store=None) -> int:
             event.project, event.number, event.event_type, event.status
         ):
             continue
-        subject, body = event.subject(), event.body()
+        subject, body = event.rendered(queue_remaining)
+        delivered = False
         for channel in channels:
             try:
                 channel.send(subject, body)
+                delivered = True
+            except UnsafeMessage as exc:
+                # Отказ предохранителя — дефект формата, а не сбой канала:
+                # обходить его нельзя, событие остаётся неотправленным.
+                print(f"ОТКАЗ предохранителя ({event.event_id()}): {exc}")
             except Exception as exc:  # noqa: BLE001 — канал не должен валить цикл
                 print(f"Предупреждение: канал {channel.name} не доставил "
                       f"уведомление: {exc}")
-        if store is not None:
+        # Журналим только фактически доставленное: иначе дедуп «съест» событие,
+        # которое владелец никогда не увидит.
+        if store is not None and delivered:
             store.record_event(event.project, event.number, event.event_type,
                                event.status, event.title, event.url)
-        sent += 1
+        if delivered:
+            sent += 1
     return sent

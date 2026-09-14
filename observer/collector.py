@@ -32,6 +32,7 @@ STATUS_LABELS = (
     "status:done",
 )
 NEEDS_HUMAN_LABEL = "needs:human"
+SUPERSEDED_LABEL = "superseded"
 _STATUS_PREFIX = "status:"
 
 # state.sqlite рядом с пакетом; путь переопределяется через ENV.
@@ -54,6 +55,9 @@ class TaskSnapshot:
     url: str | None
     last_comment_excerpt: str
     needs_human: bool
+    # Маркер «перекрыто более поздним решением». В snapshot НЕ пишется: важен
+    # только для текущего опроса, для сравнения со прошлым состоянием не нужен.
+    superseded: bool = False
 
     def key(self) -> tuple[str, int]:
         return (self.project, self.number)
@@ -108,6 +112,7 @@ def _to_snapshot(project: Project, issue: dict) -> TaskSnapshot:
         url=_url_of(issue),
         last_comment_excerpt=_excerpt(issue.get("body")),
         needs_human=NEEDS_HUMAN_LABEL in labels,
+        superseded=SUPERSEDED_LABEL in labels,
     )
 
 
@@ -119,7 +124,7 @@ def collect_project(project: Project) -> list[TaskSnapshot]:
     client = registry.make_client(project)
     by_number: dict[int, TaskSnapshot] = {}
     # Статусные метки + needs:human (задача без статуса, но с эскалацией).
-    for label in (*STATUS_LABELS, NEEDS_HUMAN_LABEL):
+    for label in (*STATUS_LABELS, NEEDS_HUMAN_LABEL, SUPERSEDED_LABEL):
         issues = client.list_issues_by_label(label)
         for issue in issues:
             snap = _to_snapshot(project, issue)
@@ -209,7 +214,7 @@ class StateStore:
                 seen_at=excluded.seen_at
             """,
             {
-                **asdict(snap),
+                **{k: v for k, v in asdict(snap).items() if k != "superseded"},
                 "needs_human": int(snap.needs_human),
                 "seen_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             },

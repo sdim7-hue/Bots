@@ -14,9 +14,29 @@ from __future__ import annotations
 
 import os
 
+from ..redact import UnsafeMessage, assert_safe
 from .console import ConsoleChannel
 from .email import EmailChannel
 from .telegram import TelegramChannel
+
+
+class SafeChannel:
+    """Обёртка: не пропускает машинный дамп/секрет в уведомление владельцу.
+
+    Предохранитель стоит ЗДЕСЬ, а не в формирователе текста: собрать сообщение
+    другим путём и обойти проверку нельзя. Отказ означает «переформулируй».
+    """
+
+    def __init__(self, inner) -> None:
+        self._inner = inner
+
+    @property
+    def name(self) -> str:
+        return self._inner.name
+
+    def send(self, subject: str, body: str) -> None:
+        assert_safe(subject, body)
+        self._inner.send(subject, body)
 
 
 def active_channels(force_console: bool = False) -> list:
@@ -49,10 +69,13 @@ def active_channels(force_console: bool = False) -> list:
     if force_console or not channels:
         channels.append(ConsoleChannel())
 
-    return channels
+    # Каждый канал — только через предохранитель.
+    return [SafeChannel(ch) for ch in channels]
 
 
 __all__ = [
+    "SafeChannel",
+    "UnsafeMessage",
     "ConsoleChannel",
     "EmailChannel",
     "TelegramChannel",

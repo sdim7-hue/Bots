@@ -37,10 +37,21 @@ class TelegramChannel:
         req.add_header("User-Agent", "bots-observer")
         try:
             with urllib.request.urlopen(req, timeout=self._timeout) as resp:
-                resp.read()
+                raw = resp.read().decode("utf-8", "replace")
         except urllib.error.HTTPError as exc:
             # Тело ошибки полезно; токен в URL, поэтому его в текст не включаем.
             detail = exc.read().decode("utf-8", "replace")[:200]
             raise TelegramError(f"Telegram API {exc.code}: {detail}") from exc
         except urllib.error.URLError as exc:
             raise TelegramError(f"Сеть недоступна: {exc.reason}") from exc
+
+        # Успех доставки = ответ API с message_id. HTTP 200 сам по себе его не
+        # доказывает: Telegram отдаёт ok=false с кодом 200 (например, бот
+        # заблокирован получателем). Без message_id считаем НЕ доставленным.
+        try:
+            data = json.loads(raw)
+        except ValueError as exc:
+            raise TelegramError("ответ Telegram не разобран как JSON") from exc
+        if not data.get("ok") or "message_id" not in (data.get("result") or {}):
+            desc = str(data.get("description", "message_id отсутствует"))[:200]
+            raise TelegramError(f"Telegram не подтвердил доставку: {desc}")
