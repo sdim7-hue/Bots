@@ -44,9 +44,26 @@ if [ ! -d "$GATE/.git" ]; then
   git -C "$GATE" remote remove origin
   git -C "$GATE" config --local credential.helper ""
 else
-  git -C "$GATE" fetch -q "$SRC" HEAD
+  # АВТО-САЛЬВАЖ (29.09.2026): работа прошлого прогона не должна молча исчезать при сбросе.
+  # Дважды (#49 17.09, #56 24.09) reset снёс коммит кодера перед запуском ревьюера.
+  if [ -n "$(git -C "$GATE" status --porcelain --untracked-files=normal | grep -v 'CLAUDE.local.md' )" ]; then
+    git -C "$GATE" add -A -- . ':!CLAUDE.local.md' && \
+    git -C "$GATE" -c user.name=bot-run -c user.email=bot-run@local commit -q -m "salvage: незакоммиченное из гейта перед сбросом ($(date +%F\ %T))" || true
+  fi
+  GH=$(git -C "$GATE" rev-parse HEAD)
+  if ! git -C "$SRC" merge-base --is-ancestor "$GH" "$(git -C "$SRC" rev-parse HEAD)" 2>/dev/null \
+     && ! git -C "$SRC" branch -a --contains "$GH" 2>/dev/null | grep -q . ; then
+    SB="salvage/$REPO-$(date +%Y%m%d-%H%M%S)"
+    git -C "$SRC" fetch -q "$GATE" "HEAD:refs/heads/$SB" && \
+      echo "САЛЬВАЖ: несохранённая работа гейта ($GH) -> ветка $SB в $SRC" >&2
+    git -C "$SRC" push -q origin "$SB" 2>/dev/null && echo "САЛЬВАЖ: $SB запушена в origin" >&2 || \
+      echo "САЛЬВАЖ: push $SB не удался — ветка только локально в $SRC" >&2
+  fi
+  # BOT_BASE — явная база гейта (ветка/коммит канона), напр. BOT_BASE=bot/lte-cov-56 для T2-ревью.
+  git -C "$GATE" fetch -q "$SRC" "${BOT_BASE:-HEAD}"
   git -C "$GATE" reset -q --hard FETCH_HEAD
   git -C "$GATE" clean -qfd
+  echo "гейт: база ${BOT_BASE:-HEAD канона} -> $(git -C "$GATE" rev-parse --short HEAD)"
 fi
 # граница гейта перепроверяется ПОСЛЕ подготовки — до неё гейта могло не быть
 if git -C "$GATE" remote | grep -q . ; then
