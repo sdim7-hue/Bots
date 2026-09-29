@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import os
 import subprocess
+import time
 import sys
 from pathlib import Path
 
@@ -167,12 +168,41 @@ def _refresh_checkout() -> None:
     base = config.CHECKOUT_BASE
     if not co or not base:
         return
+    _salvage_checkout(co, base)
     for git_args in (["fetch", base, "main"], ["reset", "--hard", "FETCH_HEAD"], ["clean", "-fd"]):
         try:
             subprocess.run(["git", "-C", co] + git_args, check=False,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=120)
         except Exception:
             pass
+
+
+def _salvage_checkout(co: str, base: str) -> None:
+    """Авто-сальваж (29.09.2026): перед сбросом сохранить незапушенную/грязную работу гейта
+    в ветку salvage/* репозитория base (канона). Потери #49 и #56 — reset снёс коммит кодера."""
+    def g(*a, cwd=co):
+        return subprocess.run(["git", "-C", cwd, *a], capture_output=True, text=True, timeout=120)
+    try:
+        st = g("status", "--porcelain").stdout
+        if any(l and not l.endswith("CLAUDE.local.md") for l in st.splitlines()):
+            g("add", "-A", "--", ".", ":!CLAUDE.local.md")
+            g("-c", "user.name=bot-run", "-c", "user.email=bot-run@local",
+              "commit", "-q", "-m", "salvage: незакоммиченное из гейта перед сбросом")
+        head = g("rev-parse", "HEAD").stdout.strip()
+        if not head:
+            return
+        known = g("branch", "-a", "--contains", head, cwd=base)
+        if known.returncode == 0 and known.stdout.strip():
+            return  # коммит уже есть в каноне
+        name = "salvage/gate-" + time.strftime("%Y%m%d-%H%M%S")
+        r = g("fetch", "-q", co, "HEAD:refs/heads/" + name, cwd=base)
+        if r.returncode == 0:
+            print(f"САЛЬВАЖ: несохранённая работа гейта {head[:8]} -> ветка {name} в {base}", file=sys.stderr)
+            p = g("push", "-q", "origin", name, cwd=base)
+            print("САЛЬВАЖ: " + ("запушена в origin" if p.returncode == 0 else "push не удался, ветка локально"), file=sys.stderr)
+    except Exception as e:
+        print(f"САЛЬВАЖ: ошибка ({e}) — сброс гейта ОТМЕНЁН", file=sys.stderr)
+        raise
 
 
 def cmd_run_next(timeout: int) -> int:
