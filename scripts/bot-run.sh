@@ -46,8 +46,21 @@ if [ ! -d "$GATE/.git" ]; then
 else
   # АВТО-САЛЬВАЖ (29.09.2026): работа прошлого прогона не должна молча исчезать при сбросе.
   # Дважды (#49 17.09, #56 24.09) reset снёс коммит кодера перед запуском ревьюера.
-  if [ -n "$(git -C "$GATE" status --porcelain --untracked-files=normal | grep -v 'CLAUDE.local.md' )" ]; then
-    git -C "$GATE" add -A -- . ':!CLAUDE.local.md' && \
+  # Вложенные worktree субагентов (.claude/worktrees/*): работа кодера может быть ТОЛЬКО там (30.09, #61).
+  for WT in "$GATE"/.claude/worktrees/*/; do
+    [ -d "$WT/.git" ] || [ -f "$WT/.git" ] || continue
+    if [ -n "$(git -C "$WT" status --porcelain)" ]; then
+      git -C "$WT" add -A && git -C "$WT" -c user.name=bot-run -c user.email=bot-run@local commit -q -m "salvage: вложенный worktree перед сбросом ($(date +%F\ %T))" || true
+    fi
+    WH=$(git -C "$WT" rev-parse HEAD)
+    if ! git -C "$SRC" branch -a --contains "$WH" 2>/dev/null | grep -q . ; then
+      WB="salvage/$REPO-wt-$(basename "$WT")-$(date +%Y%m%d-%H%M%S)"
+      git -C "$SRC" fetch -q "$WT" "HEAD:refs/heads/$WB" && echo "САЛЬВАЖ: worktree $(basename "$WT") ($WH) -> $WB" >&2
+      git -C "$SRC" push -q origin "$WB" 2>/dev/null && echo "САЛЬВАЖ: $WB запушена" >&2 || echo "САЛЬВАЖ: push $WB не удался" >&2
+    fi
+  done
+  if [ -n "$(git -C "$GATE" status --porcelain --untracked-files=normal | grep -vE 'CLAUDE.local.md|\.claude/' )" ]; then
+    git -C "$GATE" add -A -- . ':!CLAUDE.local.md' ':!.claude' && \
     git -C "$GATE" -c user.name=bot-run -c user.email=bot-run@local commit -q -m "salvage: незакоммиченное из гейта перед сбросом ($(date +%F\ %T))" || true
   fi
   GH=$(git -C "$GATE" rev-parse HEAD)
