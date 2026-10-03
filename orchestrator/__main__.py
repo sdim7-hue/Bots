@@ -112,7 +112,7 @@ def cmd_run_bot(message: str | None, file: str | None, timeout: int) -> int:
         run.close()
 
     print(result.output, end="" if result.output.endswith("\n") else "\n")
-    print(f"exit_code={result.exit_code} ok={result.ok} subtype={result.subtype}")
+    print(f"exit_code={result.exit_code} ok={result.ok} subtype={result.subtype} model={getattr(result, 'models_used', None)}")
     return 0 if result.ok else 1
 
 

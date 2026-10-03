@@ -1,0 +1,15 @@
+{
+  "_comment": "Модель на роль бота для ВСЕХ проектов. Утверждено владельцем 03.10.2026 по AI-OPS ред. 02.10 (MODEL-MATRIX, один вендор Claude). Ревьюер ОБЯЗАН отличаться моделью от автора. Переопределение на один прогон: env BOTS_MODEL. Минимальная версия Claude Code — _min_cli (Opus 5.5 требует >= 2.1.280). См. vault playbook/MODEL-MATRIX.md.",
+  "_min_cli": "2.1.280",
+  "_default": "claude-sonnet-5-5",
+  "coder": "claude-opus-5-5",
+  "devops": "claude-opus-5-5",
+  "designer": "claude-opus-5-5",
+  "reviewer": "claude-fable-5-1",
+  "architect": "claude-fable-5-1",
+  "analyst": "claude-fable-5-1",
+  "security-auditor": "claude-fable-5-1",
+  "tester": "claude-sonnet-5-5",
+  "writer": "claude-sonnet-5-5",
+  "dispatcher": "claude-sonnet-5-5"
+}

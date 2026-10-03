@@ -41,6 +41,8 @@ class BotResult:
     cost_usd: float | None = None
     num_turns: int | None = None
     raw: str = ""  # сырой stdout (для отладки)
+    model_requested: str | None = None  # модель из roles/models.json (или BOTS_MODEL)
+    models_used: list | None = None  # фактические модели из modelUsage (без служебной haiku)
 
 
 def _find_claude() -> str:
@@ -49,6 +51,9 @@ def _find_claude() -> str:
     На Windows ищем `claude.cmd`/`claude` (в т.ч. в %APPDATA%\\npm),
     на *nix — `claude` из PATH. Фолбэк — имя как есть, пусть subprocess решает.
     """
+    override = os.environ.get("BOTS_CLAUDE_BIN", "").strip()
+    if override:
+        return override
     if os.name == "nt":
         candidates = ("claude.cmd", "claude.exe", "claude")
     else:
@@ -92,6 +97,22 @@ def _sandbox_prefix(cwd: Path) -> list[str]:
     return [str(_SANDBOX_SCRIPT), str(cwd)]
 
 
+_MODELS_FILE = Path(__file__).resolve().parents[2] / "roles" / "models.json"
+
+
+def model_for_role(role: str | None) -> str | None:
+    """Модель для роли: env BOTS_MODEL > roles/models.json[role] > _default.
+    Таблица утверждена владельцем 03.10.2026 (AI-OPS MODEL-MATRIX). None = не передавать --model."""
+    forced = os.environ.get("BOTS_MODEL", "").strip()
+    if forced:
+        return forced
+    try:
+        table = json.loads(_MODELS_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    return table.get(role or "") or table.get("_default")
+
+
 def _parse_result(raw: str) -> dict:
     """Разбирает JSON-вывод `claude -p --output-format json`.
 
@@ -129,6 +150,10 @@ def run_bot(brief: str, cwd: Path, timeout: int) -> BotResult:
     cmd = _sandbox_prefix(cwd) + [
         claude, "-p", "--permission-mode", _PERMISSION_MODE, "--output-format", "json",
     ]
+    model = model_for_role(os.environ.get("BOTS_ROLE"))
+    if model:
+        cmd += ["--model", model]
+    print(f"модель: {model or 'по умолчанию CLI'} (роль {os.environ.get('BOTS_ROLE') or '?'})")
 
     popen_kwargs = dict(
         cwd=str(cwd), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -176,7 +201,17 @@ def run_bot(brief: str, cwd: Path, timeout: int) -> BotResult:
     else:
         ok = (returncode == 0) and (is_error is not True)
 
+    # Доказательство модели (AI-OPS: профиль/авторизация НЕ доказывают живую модель): служебная haiku
+    # игнорируется; если запрошенной модели нет среди работавших — результат НЕ ok (fail-closed).
+    used = [k for k in (data.get("modelUsage") or {}) if "haiku" not in k]
+    if model and used and model not in used:
+        ok = False
+        subtype = "model_mismatch"
+        result_text = (f"МОДЕЛЬ НЕ СОВПАЛА: запрошена {model}, работали {used}.\n" + (result_text or ""))
+    print(f"модель фактически: {used or 'неизвестно (нет modelUsage)'}")
+
     return BotResult(
         exit_code=returncode, output=result_text, ok=ok, subtype=subtype,
         cost_usd=data.get("total_cost_usd"), num_turns=data.get("num_turns"), raw=raw,
+        model_requested=model, models_used=used,
     )

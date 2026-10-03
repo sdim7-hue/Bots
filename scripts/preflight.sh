@@ -83,12 +83,28 @@ free_mb=$(df -Pm "$HOME" | awk 'NR==2{print $4}')
 if [ "${free_mb:-0}" -ge "$MIN_FREE_MB" ]; then ok "свободно ${free_mb} МБ"
 else fail "мало места: ${free_mb} МБ < ${MIN_FREE_MB} МБ"; fi
 
-# 8. CLI Claude действительно авторизован (L68: orch list это НЕ доказывает)
-if command -v claude >/dev/null 2>&1; then
-  if timeout "$PING_TIMEOUT" claude -p "ping" >/dev/null 2>&1
-  then ok "claude -p ping прошёл"
-  else fail "claude -p ping не прошёл — OAuth истёк, нужен /login (или ANTHROPIC_API_KEY)"; fi
-else fail "бинарь claude не найден в PATH"; fi
+# 8. CLI Claude авторизован И модель роли реально доступна (AI-OPS: профиль не доказывает живую модель).
+#    Модель роли — roles/models.json (утверждено владельцем 03.10.2026); бинарь — BOTS_CLAUDE_BIN или PATH.
+CLAUDE_BIN="${BOTS_CLAUDE_BIN:-$(command -v claude 2>/dev/null)}"
+ROLE_MODEL=$(BOTS_ROLE="$ROLE" python3 -c "import sys; sys.path.insert(0,'$BOTS_DIR'); from orchestrator.adapters.local import model_for_role; import os; print(model_for_role(os.environ.get('BOTS_ROLE')) or '')" 2>/dev/null)
+if [ -n "$CLAUDE_BIN" ] && [ -x "$CLAUDE_BIN" ]; then
+  cli_ver=$("$CLAUDE_BIN" --version 2>/dev/null | awk '{print $1}')
+  PING_JSON=$(timeout "$PING_TIMEOUT" "$CLAUDE_BIN" -p ${ROLE_MODEL:+--model "$ROLE_MODEL"} --output-format json "Reply with exactly: OK" 2>/dev/null)
+  verdict=$(printf '%s' "$PING_JSON" | python3 -c "
+import json,sys
+want=sys.argv[1]
+try: d=json.load(sys.stdin)
+except Exception: print('FAIL нет JSON-ответа (OAuth истёк? нужен /login)'); sys.exit()
+used=[k for k in (d.get('modelUsage') or {}) if 'haiku' not in k]
+if d.get('is_error'): print('FAIL '+str(d.get('result'))[:160])
+elif want and want not in used: print('FAIL модель не подтверждена: запрошена '+want+', ответили '+str(used))
+else: print('OK '+(','.join(used) or 'модель не указана'))
+" "$ROLE_MODEL")
+  case "$verdict" in
+    OK*) ok "claude $cli_ver: роль $ROLE -> модель подтверждена (${verdict#OK })";;
+    *)   fail "claude $cli_ver, роль $ROLE, модель ${ROLE_MODEL:-default}: ${verdict#FAIL }";;
+  esac
+else fail "бинарь claude не найден (BOTS_CLAUDE_BIN/PATH)"; fi
 
 # 9. ОС-песочница: граница записи ДОКАЗЫВАЕТСЯ пробой, а не наличием bwrap.
 #    Проверяется до запуска модели (import-ai-ops B4): запись в гейт разрешена,
