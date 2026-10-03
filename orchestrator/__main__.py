@@ -183,9 +183,26 @@ def _salvage_checkout(co: str, base: str) -> None:
     def g(*a, cwd=co):
         return subprocess.run(["git", "-C", cwd, *a], capture_output=True, text=True, timeout=120)
     try:
+        # Вложенные worktree субагентов (.claude/worktrees/*): работа кодера может быть ТОЛЬКО там (L85, 30.09).
+        wt_root = os.path.join(co, ".claude", "worktrees")
+        if os.path.isdir(wt_root):
+            for name in sorted(os.listdir(wt_root)):
+                wt = os.path.join(wt_root, name)
+                if not os.path.exists(os.path.join(wt, ".git")):
+                    continue
+                if g("status", "--porcelain", cwd=wt).stdout.strip():
+                    g("add", "-A", cwd=wt)
+                    g("-c", "user.name=bot-run", "-c", "user.email=bot-run@local",
+                      "commit", "-q", "-m", "salvage: вложенный worktree перед сбросом", cwd=wt)
+                wh = g("rev-parse", "HEAD", cwd=wt).stdout.strip()
+                if wh and not g("branch", "-a", "--contains", wh, cwd=base).stdout.strip():
+                    wb = "salvage/gate-wt-" + name + "-" + time.strftime("%Y%m%d-%H%M%S")
+                    if g("fetch", "-q", wt, "HEAD:refs/heads/" + wb, cwd=base).returncode == 0:
+                        print(f"САЛЬВАЖ: worktree {name} {wh[:8]} -> {wb}", file=sys.stderr)
+                        g("push", "-q", "origin", wb, cwd=base)
         st = g("status", "--porcelain").stdout
-        if any(l and not l.endswith("CLAUDE.local.md") for l in st.splitlines()):
-            g("add", "-A", "--", ".", ":!CLAUDE.local.md")
+        if any(l and not l.endswith("CLAUDE.local.md") and ".claude/" not in l for l in st.splitlines()):
+            g("add", "-A", "--", ".", ":!CLAUDE.local.md", ":!.claude")
             g("-c", "user.name=bot-run", "-c", "user.email=bot-run@local",
               "commit", "-q", "-m", "salvage: незакоммиченное из гейта перед сбросом")
         head = g("rev-parse", "HEAD").stdout.strip()
