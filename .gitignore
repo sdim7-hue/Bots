@@ -21,3 +21,16 @@ secrets.*
 Thumbs.db
 .vscode/
 .idea/
+# office runtime artefacts (briefs/logs of orchestrator runs)
+brief-*.md
+briefs/
+orch-*.log
+cc-*.log
+cc-*.flag
+*.tmp
+z*.log
+z*.done
+z*.ps1
+zbaseline.txt
+dry.out
+dry.err
