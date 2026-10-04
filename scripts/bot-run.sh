@@ -30,7 +30,7 @@ SRC="$HOME/work/$REPO"
 GATE="$HOME/work/gates/$REPO"
 [ -d "$SRC/.git" ] || { echo "нет локального клона $SRC" >&2; exit 1; }
 [ -f "$BOTS_DIR/roles/$ROLE.md" ] || { echo "нет роли $ROLE" >&2; exit 1; }
-. "$HOME/.bots/env"
+set -a; . "$HOME/.bots/env"; set +a  # 04.10: строки без export (токен Claude) иначе не доходили до процесса claude
 export BOTS_CLAUDE_BIN BOTS_MODEL  # модель/бинарь Claude для роли (roles/models.json), см. preflight п.8
 export BOTS_REPO="$REPO"
 
