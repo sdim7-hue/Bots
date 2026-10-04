@@ -164,6 +164,14 @@ def run_bot(brief: str, cwd: Path, timeout: int) -> BotResult:
     else:
         popen_kwargs["start_new_session"] = True
 
+    # Фоновые задачи в режиме -p запрещены (04.10.2026): новые модели/CLI уводят долгие команды (test:ui ~4 мин)
+    # в фон и завершают ход «в ожидании уведомления» — в headless его нет, прогон обрывался без вердикта
+    # (T2 #65/#66). Длинные команды — в переднем плане с увеличенными таймаутами Bash. Переопределяемо через env.
+    child_env = dict(popen_kwargs.get("env") or os.environ)
+    child_env.setdefault("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS", "1")
+    child_env.setdefault("BASH_DEFAULT_TIMEOUT_MS", "900000")   # 15 мин
+    child_env.setdefault("BASH_MAX_TIMEOUT_MS", "2400000")      # 40 мин
+    popen_kwargs["env"] = child_env
     proc = subprocess.Popen(cmd, **popen_kwargs)
     timed_out = False
     try:
