@@ -77,7 +77,12 @@ else
   git -C "$GATE" fetch -q "$SRC" "${BOT_BASE:-HEAD}"
   git -C "$GATE" reset -q --hard FETCH_HEAD
   git -C "$GATE" clean -qfd
-  echo "гейт: база ${BOT_BASE:-HEAD канона} -> $(git -C "$GATE" rev-parse --short HEAD)"
+  # Имя ветки гейта = база прогона (04.10.2026: tester честно вернул BLOCKED — гейт стоял на ветке
+  # со старым именем bot/vols-gold-54 при правильном коде — сборку нельзя было подтвердить).
+  GBR="${BOT_BASE:-$(git -C "$SRC" rev-parse --abbrev-ref HEAD 2>/dev/null || echo gate-work)}"
+  [ "$GBR" = "HEAD" ] && GBR=gate-work
+  git -C "$GATE" checkout -q -B "$GBR" 2>/dev/null || true
+  echo "гейт: база ${BOT_BASE:-HEAD канона} -> $(git -C "$GATE" rev-parse --short HEAD) (ветка $(git -C "$GATE" rev-parse --abbrev-ref HEAD))"
 fi
 # граница гейта перепроверяется ПОСЛЕ подготовки — до неё гейта могло не быть
 if git -C "$GATE" remote | grep -q . ; then
